@@ -1,5 +1,5 @@
 ---
-name: modbus-test
+name: yzc-modbus-test
 description: Run CSV-driven Modbus serial tests. Supports single file or folder batch mode. Triggers when user mentions modbus test, serial test, integration test, CSV test, or wants to verify register behavior via serial port.
 metadata:
   short-description: Modbus CSV serial test runner

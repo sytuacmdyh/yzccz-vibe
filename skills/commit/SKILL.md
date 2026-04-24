@@ -1,5 +1,5 @@
 ---
-name: commit
+name: yzc-commit
 description: 生成符合规范的提交信息并创建 git commit。输出中文 Conventional Commits 格式，包含标题和正文要点。
 metadata:
   short-description: 生成规范提交信息并提交

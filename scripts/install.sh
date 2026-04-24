@@ -28,15 +28,14 @@ TARGETS=(
 skill_count=0
 for TARGET in "${TARGETS[@]}"; do
     mkdir -p "$TARGET"
-    YZC_DIR="$TARGET/yzc"
 
     for skill_src in "${skill_dirs[@]}"; do
         skill_name="$(basename "$skill_src")"
-        TMP_DST="$YZC_DIR/.tmp.$skill_name"
-        FINAL_DST="$YZC_DIR/$skill_name"
+        prefixed_name="yzc-$skill_name"
+        TMP_DST="$TARGET/.tmp.$prefixed_name"
+        FINAL_DST="$TARGET/$prefixed_name"
 
         # Stage to temp location
-        mkdir -p "$YZC_DIR"
         rm -rf "$TMP_DST"
         cp -rL "$skill_src" "$TMP_DST"
 
@@ -44,7 +43,7 @@ for TARGET in "${TARGETS[@]}"; do
         rm -rf "$FINAL_DST"
         mv "$TMP_DST" "$FINAL_DST"
 
-        echo "  yzc/$skill_name -> $FINAL_DST"
+        echo "  $skill_name -> $FINAL_DST"
         skill_count=$((skill_count + 1))
     done
 done
