@@ -18,6 +18,8 @@ from typing import Any
 
 DEFAULT_START_TIME_ADDR = 3080
 DEFAULT_CLIENT_TIMEOUT_S = 3.0
+WRITE_RETRY_COUNT = 3
+WRITE_RETRY_DELAY_S = 1.0
 FUNC_WRITE = "write"
 FUNC_READ = "read"
 FUNC_DELAY = "delay"
@@ -360,6 +362,13 @@ def ensure_session_time(ctx: ExecutionContext) -> None:
         raise SessionTimeoutError("session timeout exceeded")
 
 
+def sleep_with_session_check(ctx: ExecutionContext, duration_s: float) -> None:
+    end_time = time.monotonic() + max(duration_s, 0.0)
+    while time.monotonic() < end_time:
+        ensure_session_time(ctx)
+        time.sleep(min(0.2, end_time - time.monotonic()))
+
+
 def read_register(client: Any, slave_id: int, addr: int) -> tuple[bool, int | None, str]:
     try:
         result = client.read_holding_registers(address=addr, count=1, device_id=slave_id)
@@ -539,10 +548,24 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
         summary = f"write {step.addr}={value}"
         if ctx.dry_run:
             return StepResult(index, step.func, "PASS", summary)
-        ok, error = write_register(ctx.client, ctx.slave_id, step.addr, value)
-        if ok:
-            return StepResult(index, step.func, "PASS", summary)
-        return StepResult(index, step.func, "FAIL", summary, error)
+        max_attempts = WRITE_RETRY_COUNT + 1
+        last_error = ""
+        for attempt in range(1, max_attempts + 1):
+            ensure_session_time(ctx)
+            ok, error = write_register(ctx.client, ctx.slave_id, step.addr, value)
+            if ok:
+                detail = "" if attempt == 1 else f"attempts={attempt}"
+                return StepResult(index, step.func, "PASS", summary, detail)
+            last_error = error or "write failed"
+            if attempt < max_attempts:
+                sleep_with_session_check(ctx, WRITE_RETRY_DELAY_S)
+        return StepResult(
+            index,
+            step.func,
+            "FAIL",
+            summary,
+            f"{last_error} attempts={max_attempts}",
+        )
 
     if step.func == FUNC_DELAY:
         base_delay = float(step.value)
@@ -568,10 +591,7 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
             total_delay += float(extra_delay)
 
         summary = f"delay {format_seconds(total_delay)}s"
-        end_time = time.monotonic() + max(total_delay, 0.0)
-        while time.monotonic() < end_time:
-            ensure_session_time(ctx)
-            time.sleep(min(0.2, end_time - time.monotonic()))
+        sleep_with_session_check(ctx, total_delay)
         return StepResult(index, step.func, "PASS", summary)
 
     if step.func == FUNC_READ:

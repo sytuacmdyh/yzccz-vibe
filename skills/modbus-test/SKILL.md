@@ -67,7 +67,7 @@ read,4250,350,Verify target temp
 
 | Operation | Behavior |
 |-----------|----------|
-| `write` | Write single holding register |
+| `write` | Write single holding register; on failure wait 1s and retry up to 3 times |
 | `read` | Read holding register and compare (exact/range/bit) |
 | `delay` | Sleep (address=0: use value as seconds; address!=0: add register value) |
 | `wait` | Poll register until match or timeout; supports per-step timeout overrides |
