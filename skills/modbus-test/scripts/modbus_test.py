@@ -139,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--continue-on-fail",
         action="store_true",
-        help="Continue after step or file failures",
+        help="On file failure, continue with the next CSV instead of stopping the batch",
     )
     args = parser.parse_args()
     if args.wait_timeout < 1:
@@ -700,7 +700,6 @@ def run_file(
     csv_path: Path,
     steps: list[Step],
     ctx: ExecutionContext,
-    continue_on_fail: bool,
     *,
     verbose: bool,
     display_name: str | None = None,
@@ -728,8 +727,7 @@ def run_file(
             continue
 
         status = "fail"
-        if not continue_on_fail:
-            break
+        break
 
     total = len(steps)
     duration_s = time.monotonic() - started
@@ -847,7 +845,6 @@ def main() -> int:
                     csv_path,
                     steps,
                     ctx,
-                    args.continue_on_fail,
                     verbose=False,
                     display_name=display,
                 )
@@ -862,7 +859,6 @@ def main() -> int:
                     csv_path,
                     steps,
                     ctx,
-                    args.continue_on_fail,
                     verbose=True,
                 )
             )

@@ -25,7 +25,7 @@ The user may provide:
 - **--slave-id**: Modbus slave ID (default: 1)
 - **--recursive**: Recursively search subdirectories for CSV files
 - **--dry-run**: Parse only, no Modbus I/O
-- **--continue-on-fail**: Continue on verification failure
+- **--continue-on-fail**: On file failure, continue with the next CSV instead of stopping the batch
 
 ## Execution Steps
 
