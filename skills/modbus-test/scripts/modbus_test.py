@@ -130,6 +130,11 @@ def parse_args() -> argparse.Namespace:
         help="Parse only, do not connect or execute Modbus requests",
     )
     parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Recursively search subdirectories for CSV files",
+    )
+    parser.add_argument(
         "--continue-on-fail",
         action="store_true",
         help="Continue after step or file failures",
@@ -148,7 +153,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def resolve_input_files(raw_path: str) -> tuple[Path, list[Path], bool]:
+def resolve_input_files(raw_path: str, recursive: bool = False) -> tuple[Path, list[Path], bool]:
     input_path = Path(raw_path).expanduser()
     if not input_path.exists():
         raise CsvParseError(f"path does not exist: {input_path}")
@@ -157,9 +162,10 @@ def resolve_input_files(raw_path: str) -> tuple[Path, list[Path], bool]:
     if not input_path.is_dir():
         raise CsvParseError(f"path is not a file or directory: {input_path}")
 
+    pattern = "**/*.csv" if recursive else "*.csv"
     files = sorted(
-        [path for path in input_path.glob("*.csv") if path.is_file()],
-        key=extract_number,
+        [path for path in input_path.glob(pattern) if path.is_file()],
+        key=lambda p: extract_number(p.relative_to(input_path)),
     )
     if not files:
         raise CsvParseError(f"no CSV files found in directory: {input_path}")
@@ -677,9 +683,11 @@ def run_file(
     continue_on_fail: bool,
     *,
     verbose: bool,
+    display_name: str | None = None,
 ) -> FileResult:
+    name = display_name or csv_path.name
     if verbose:
-        print(f"=== TEST: {csv_path.name} ===")
+        print(f"=== TEST: {name} ===")
     started = time.monotonic()
     step_results: list[StepResult] = []
     passed = 0
@@ -713,7 +721,7 @@ def run_file(
         print(f"=== RESULT: {verdict} ({passed}/{total} passed) ===")
         print()
     return FileResult(
-        name=csv_path.name,
+        name=name,
         path=str(csv_path),
         status=status,
         passed=passed,
@@ -730,7 +738,7 @@ def print_batch_header(base_path: Path) -> None:
 
 def print_batch_progress(index: int, total: int, result: FileResult) -> None:
     print(
-        f"[{index}/{total}] {result.name:<16} ... {result.status.upper()} "
+        f"[{index}/{total}] {result.name} ... {result.status.upper()} "
         f"({result.passed}/{result.total})"
     )
 
@@ -738,12 +746,14 @@ def print_batch_progress(index: int, total: int, result: FileResult) -> None:
 def print_summary(results: list[FileResult]) -> None:
     print()
     print("=== SUMMARY ===")
-    print("| File          | Result | Passed/Total |")
-    print("|---------------|--------|--------------|")
+    max_name = max(len(r.name) for r in results) if results else 4
+    col = max(max_name, 4)
+    print(f"| {'File':<{col}} | Result | Passed/Total |")
+    print(f"|{'-' * (col + 2)}|--------|--------------|")
     for result in results:
         ratio = f"{result.passed}/{result.total}"
         print(
-            f"| {result.name:<13} | {result.status.upper():<6} | "
+            f"| {result.name:<{col}} | {result.status.upper():<6} | "
             f"{ratio:<12} |"
         )
     passed_files = sum(1 for result in results if result.status == "pass")
@@ -777,11 +787,13 @@ def main() -> int:
     args = parse_args()
 
     try:
-        input_path, csv_files, is_batch = resolve_input_files(args.path)
+        input_path, csv_files, is_batch = resolve_input_files(args.path, args.recursive)
         parsed_files = [(csv_path, parse_csv(csv_path, args.encoding)) for csv_path in csv_files]
     except CsvParseError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    use_relative = args.recursive and is_batch
 
     client = None
     port = args.port
@@ -810,12 +822,14 @@ def main() -> int:
         if is_batch:
             print_batch_header(input_path)
             for index, (csv_path, steps) in enumerate(parsed_files, start=1):
+                display = str(csv_path.relative_to(input_path)) if use_relative else csv_path.name
                 result = run_file(
                     csv_path,
                     steps,
                     ctx,
                     args.continue_on_fail,
                     verbose=False,
+                    display_name=display,
                 )
                 results.append(result)
                 print_batch_progress(index, len(parsed_files), result)

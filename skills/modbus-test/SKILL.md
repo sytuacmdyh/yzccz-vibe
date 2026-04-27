@@ -23,6 +23,7 @@ The user may provide:
 - **--port**: Serial port (default: auto-detect)
 - **--baudrate**: Baud rate (default: 115200)
 - **--slave-id**: Modbus slave ID (default: 1)
+- **--recursive**: Recursively search subdirectories for CSV files
 - **--dry-run**: Parse only, no Modbus I/O
 - **--continue-on-fail**: Continue on verification failure
 
@@ -33,7 +34,7 @@ The user may provide:
 3. **Build command**:
    ```bash
    uv run --with "pymodbus>=3.0,<4.0" --with "pyserial>=3.5,<4.0" \
-     ~/.claude/skills/modbus-test/scripts/modbus_test.py <path> --port <port> [--baudrate 115200] [--slave-id 1]
+     ~/.claude/skills/modbus-test/scripts/modbus_test.py <path> --port <port> [--baudrate 115200] [--slave-id 1] [--recursive]
    ```
    Add `--dry-run` or `--continue-on-fail` if user requested.
 4. **Show command**: Display the full command before execution.
@@ -97,6 +98,6 @@ When inline wait options are used:
 - All register operations target holding registers (FC 03/06)
 - Serial connection shared across entire run (no per-file reconnect)
 - Device state carries over between files in batch mode
-- Folder scan is non-recursive (top-level *.csv only)
+- Folder scan is non-recursive by default (top-level *.csv only); use `--recursive` to search subdirectories
 - CSV encoding: UTF-8 with BOM (utf-8-sig)
 - Chinese column headers supported (功能/目标地址/目标值/说明)
