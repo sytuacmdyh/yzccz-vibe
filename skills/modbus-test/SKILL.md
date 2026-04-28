@@ -23,6 +23,7 @@ The user may provide:
 - **--port**: Serial port (default: auto-detect)
 - **--baudrate**: Baud rate (default: 115200)
 - **--slave-id**: Modbus slave ID (default: 1)
+- **--session-timeout**: Maximum run time in seconds for the whole session (default: 120)
 - **--recursive**: Recursively search subdirectories for CSV files
 - **--dry-run**: Parse only, no Modbus I/O
 - **--continue-on-fail**: On file failure, continue with the next CSV instead of stopping the batch
@@ -38,7 +39,7 @@ The user may provide:
    ```
    Add `--dry-run` or `--continue-on-fail` if user requested.
 4. **Show command**: Display the full command before execution.
-5. **Execute**: Run the command. Timeout: 120s per file, folder mode = file_count * 120s.
+5. **Execute**: Run the command. Default timeout: 120s for the entire session. When specifying `--session-timeout`, reserve enough margin based on test case count and content (e.g., `delay`/`wait` durations, write retry overhead).
 6. **Summarize**: Parse output and present a summary table to the user.
 
 ## Output Format
