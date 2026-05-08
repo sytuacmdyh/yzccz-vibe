@@ -126,7 +126,9 @@ Power on/off device. Value: `on`/`off`/`true`/`false`/`1`/`0`
 | `cur_fan_speed` | `3_4` | int | Current fan speed |
 | `comp_status` | `3_5` | int | Compressor status |
 
-Value format for `sim_read`: `property:expected` (same formats as Modbus read: exact/range/bit)
+Value format for `sim_read`: `property:expected`
+- For bool properties (`power`): `true`/`false`/`on`/`off`/`1`/`0`
+- For numeric properties: exact integer, range `"min,max"` (quote in CSV), or bit `bN`
 
 Value format for `sim_wait`: `property:expected[;timeout=N][;interval=M]`
 - `timeout=N`: seconds (time-based); defaults to `--wait-timeout` value when omitted
@@ -138,15 +140,16 @@ Value format for `sim_wait`: `property:expected[;timeout=N][;interval=M]`
 
 ```csv
 function,address,value,description
-sim_power,1,on,Device 1 power on
+sim_control,1,power:true,Set hardware power on
 delay,0,3,Wait 3s
 sim_control,1,mode:3,Set heating mode
 sim_control,1,target_temp:24,Set target temp 24C
 delay,0,2,Wait 2s
 sim_read,1,power:true,Verify power on
 sim_wait,1,indoor_temp:240;timeout=15,Wait indoor temp >= 24.0C
-read,600,1,Verify power via modbus
 ```
+
+> **CSV tip**: Range values containing commas must be quoted: `"indoor_temp:200,260"`, not `indoor_temp:200,260`.
 
 ### Read Value Formats
 
