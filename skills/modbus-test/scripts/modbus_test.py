@@ -969,33 +969,35 @@ def build_json_summary(
 ) -> dict[str, Any]:
     overall_status = "pass" if all(result.status == "pass" for result in results) else "fail"
     passed_files = sum(1 for result in results if result.status == "pass")
+    files_json = [
+        {
+            "name": result.name,
+            "status": result.status,
+            "passed": result.passed,
+            "total": result.total,
+            "duration_s": round(result.duration_s, 3),
+        }
+        for result in results
+    ]
     summary: dict[str, Any] = {
         "status": overall_status,
         "total_files": len(results),
         "passed_files": passed_files,
-        "files": [
-            {
-                "name": result.name,
-                "status": result.status,
-                "passed": result.passed,
-                "total": result.total,
-                "duration_s": round(result.duration_s, 3),
-                "steps": [
-                    {
-                        "row": step.index,
-                        "function": step.func,
-                        "status": step.status.lower(),
-                        "duration_s": round(step.duration_s, 3),
-                        "summary": step.summary,
-                        "detail": step.detail,
-                    }
-                    for step in result.step_results
-                ],
-            }
-            for result in results
-        ],
+        "files": files_json,
     }
     if include_stats:
+        for i, result in enumerate(results):
+            files_json[i]["steps"] = [
+                {
+                    "row": step.index,
+                    "function": step.func,
+                    "status": step.status.lower(),
+                    "duration_s": round(step.duration_s, 3),
+                    "summary": step.summary,
+                    "detail": step.detail,
+                }
+                for step in result.step_results
+            ]
         stats = collect_time_stats(results)
         summary["stats"] = [
             {
