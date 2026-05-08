@@ -30,7 +30,7 @@ The user may provide:
 - **--dry-run**: Parse only, no Modbus I/O, no HTTP calls
 - **--continue-on-fail**: On file failure, continue with the next CSV instead of stopping the batch
 - **--stats**: Print per-function-type timing statistics (count/total/avg/min/max)
-- **--sim-api**: DeviceSimulator API base URL (e.g. `http://127.0.0.1:9090`); required when CSV contains `sim_*` operations (not required for `--dry-run`)
+- **--sim-api**: DeviceSimulator API base URL (default: `http://127.0.0.1:9090`)
 - **--sim-http-timeout**: HTTP request timeout for DeviceSimulator API (default: 5.0s)
 
 ## Execution Steps
@@ -81,7 +81,7 @@ read,4250,350,Verify target temp
 | `wait` | Poll register until match or timeout; supports per-step `timeout=` (host time) or `logic_timeout=` (device time) |
 | `read_start_time` | Read register at `--time-addr` (default 4399) as elapsed time observation baseline |
 | `logic_delay` | Poll device logic time register until elapsed seconds; address=0 uses `--time-addr`; **device logic time** |
-| `sim_power` | Power on/off device via DeviceSimulator API (controls MQTT connection); address=DeviceIndex(>0) |
+| `sim_power` | Power on/off device via DeviceSimulator API (controls LAN UDP connection); address=DeviceIndex(>0) |
 | `sim_control` | Set device property via DeviceSimulator API; address=DeviceIndex(>0), value=`property:value` |
 | `sim_read` | Read device hardware snapshot and compare; address=DeviceIndex(>0), value=`property:expected` |
 | `sim_wait` | Poll device hardware snapshot until match or timeout; address=DeviceIndex(>0), value=`property:expected[;timeout=N][;interval=M]` |
@@ -98,19 +98,33 @@ Set device properties. Value format: `property:value`
 
 | Property | Value Type | Range | Note |
 |----------|-----------|-------|------|
-| `power` | bool (true/false) | — | Only writes hardware state, does NOT control MQTT connection |
+| `power` | bool (true/false) | — | Only writes hardware state, does NOT control network connection |
 | `mode` | int | — | Mode |
 | `fan_level` | int | — | Fan level |
 | `target_temp` | int | 16–32 | **Celsius degrees**, not register value (e.g. use 24 for 24°C, not 240) |
 
-**`sim_control power` vs `sim_power`**:
-- `sim_power` → controls MQTT connection (device on/off)
-- `sim_control power` → only writes hardware state
-- Prefer `sim_power` for power operations
+**`sim_power` vs `sim_control power`**:
+
+Both control device "power" but target different layers:
+
+| | `sim_power` | `sim_control power` |
+|---|---|---|
+| **What it does** | Control LAN UDP + MQTT connection (connect/disconnect) | Write hardware power register (`2_1`) |
+| **API endpoint** | `POST /api/devices/{sn}/power` | `POST /api/devices/{sn}/property` |
+| **Analogy** | Plug in / unplug the device | Press the power button on the device |
+| **Affects `connected`** | Yes (UDP/MQTT online status) | No |
+| **Affects hardware `power`** | No | Yes |
+| **Verifiable via `sim_read`** | No (no `connected` property) | Yes (`sim_read power:true`) |
+
+**When to use which**:
+- Full device power-up: `sim_power on` → then `sim_control power:true` (establish connection + set hardware state)
+- Only change hardware state without touching connection: `sim_control power:true`
+- Only connect/disconnect UDP/MQTT: `sim_power on/off`
+- Power down: `sim_control power:false` → then `sim_power off`
 
 #### sim_power
 
-Power on/off device. Value: `on`/`off`/`true`/`false`/`1`/`0`
+Power on/off device (LAN UDP + MQTT connection). Value: `on`/`off`/`true`/`false`/`1`/`0`
 
 #### sim_read / sim_wait — Hardware Snapshot Properties
 
@@ -187,6 +201,6 @@ The register at `--time-addr` (default 4399) is a **uint16 seconds counter** tha
 - Folder scan is non-recursive by default (top-level *.csv only); use `--recursive` to search subdirectories
 - CSV encoding: UTF-8 with BOM (utf-8-sig)
 - Chinese column headers supported (功能/目标地址/目标值/说明)
-- `--sim-api` is required when CSV contains `sim_*` operations (not required for `--dry-run`)
+- `--sim-api` defaults to `http://127.0.0.1:9090` (not required for `--dry-run`)
 - API errors and unreachable DeviceSimulator produce step FAIL results, not script aborts
 - Duplicate DeviceIndex values cause startup error

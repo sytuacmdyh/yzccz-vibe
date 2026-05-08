@@ -210,8 +210,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--sim-api",
-        default="",
-        help="DeviceSimulator API base URL (e.g. http://127.0.0.1:9090)",
+        default="http://127.0.0.1:9090",
+        help="DeviceSimulator API base URL (default: http://127.0.0.1:9090)",
     )
     parser.add_argument(
         "--sim-http-timeout",
