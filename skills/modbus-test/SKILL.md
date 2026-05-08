@@ -28,6 +28,7 @@ The user may provide:
 - **--recursive**: Recursively search subdirectories for CSV files
 - **--dry-run**: Parse only, no Modbus I/O
 - **--continue-on-fail**: On file failure, continue with the next CSV instead of stopping the batch
+- **--stats**: Print per-function-type timing statistics (count/total/avg/min/max)
 
 ## Execution Steps
 
@@ -38,7 +39,7 @@ The user may provide:
    uv run --with "pymodbus>=3.0,<4.0" --with "pyserial>=3.5,<4.0" \
      ~/.claude/skills/modbus-test/scripts/modbus_test.py <path> --port <port> [--baudrate 115200] [--slave-id 1] [--time-addr 4399] [--recursive]
    ```
-   Add `--dry-run`, `--continue-on-fail`, or `--time-addr` if user requested.
+   Add `--dry-run`, `--continue-on-fail`, `--stats`, or `--time-addr` if user requested.
 4. **Show command**: Display the full command before execution.
 5. **Execute**: Run the command. Default timeout: 120s for the entire session. When specifying `--session-timeout`, reserve enough margin based on test case count and content (e.g., `delay`/`wait` durations, write retry overhead).
 6. **Summarize**: Parse output and present a summary table to the user.
@@ -49,6 +50,7 @@ The script outputs step-by-step results (PASS/FAIL) and a summary.
 
 **Single file**: Shows each step result and final pass/fail count.
 **Folder batch**: Shows per-file results + summary table + JSON.
+**With `--stats`**: Adds a per-function-type timing table (write/read/delay/wait etc.) with count, total, avg, min, max columns.
 
 ## CSV Format
 

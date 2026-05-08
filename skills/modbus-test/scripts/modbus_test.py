@@ -65,6 +65,17 @@ class StepResult:
     status: str
     summary: str
     detail: str = ""
+    duration_s: float = 0.0
+
+
+@dataclass
+class FuncStats:
+    func: str
+    count: int
+    total_s: float
+    min_s: float
+    max_s: float
+    avg_s: float
 
 
 @dataclass
@@ -151,6 +162,11 @@ def parse_args() -> argparse.Namespace:
         "--continue-on-fail",
         action="store_true",
         help="On file failure, continue with the next CSV instead of stopping the batch",
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print per-function-type timing statistics (default: disabled)",
     )
     args = parser.parse_args()
     if args.wait_timeout < 1:
@@ -836,10 +852,12 @@ def run_file(
     error = ""
 
     for step_number, step in enumerate(steps, start=1):
+        step_started = time.monotonic()
         try:
             result = execute_step(step, ctx)
         except SessionTimeoutError as exc:
             result = StepResult(step.row_num, step.func, "FAIL", step.func, str(exc))
+        result.duration_s = time.monotonic() - step_started
 
         step_results.append(result)
         if verbose:
@@ -903,10 +921,55 @@ def print_summary(results: list[FileResult]) -> None:
     )
 
 
-def build_json_summary(results: list[FileResult]) -> dict[str, Any]:
+def collect_time_stats(results: list[FileResult]) -> list[FuncStats]:
+    buckets: dict[str, list[float]] = {}
+    order: list[str] = []
+    for result in results:
+        for step in result.step_results:
+            if step.func not in buckets:
+                buckets[step.func] = []
+                order.append(step.func)
+            buckets[step.func].append(step.duration_s)
+
+    stats: list[FuncStats] = []
+    for func in order:
+        durations = buckets[func]
+        total = sum(durations)
+        stats.append(FuncStats(
+            func=func,
+            count=len(durations),
+            total_s=total,
+            min_s=min(durations),
+            max_s=max(durations),
+            avg_s=total / len(durations),
+        ))
+    return stats
+
+
+def print_time_stats(stats: list[FuncStats], results: list[FileResult]) -> None:
+    print()
+    print("=== TIME STATISTICS ===")
+    print(f"| {'Function':<12} | {'Count':>5} | {'Total':>8} | {'Avg':>8} | {'Min':>8} | {'Max':>8} |")
+    print(f"|{'-' * 14}|{'-' * 7}|{'-' * 10}|{'-' * 10}|{'-' * 10}|{'-' * 10}|")
+    for s in stats:
+        print(
+            f"| {s.func:<12} | {s.count:>5} | {format_seconds(s.total_s):>7}s "
+            f"| {format_seconds(s.avg_s):>7}s | {format_seconds(s.min_s):>7}s "
+            f"| {format_seconds(s.max_s):>7}s |"
+        )
+    total_count = sum(s.count for s in stats)
+    total_dur = sum(s.total_s for s in stats)
+    print(f"| {'TOTAL':<12} | {total_count:>5} | {format_seconds(total_dur):>7}s |")
+
+
+def build_json_summary(
+    results: list[FileResult],
+    *,
+    include_stats: bool = False,
+) -> dict[str, Any]:
     overall_status = "pass" if all(result.status == "pass" for result in results) else "fail"
     passed_files = sum(1 for result in results if result.status == "pass")
-    return {
+    summary: dict[str, Any] = {
         "status": overall_status,
         "total_files": len(results),
         "passed_files": passed_files,
@@ -917,10 +980,35 @@ def build_json_summary(results: list[FileResult]) -> dict[str, Any]:
                 "passed": result.passed,
                 "total": result.total,
                 "duration_s": round(result.duration_s, 3),
+                "steps": [
+                    {
+                        "row": step.index,
+                        "function": step.func,
+                        "status": step.status.lower(),
+                        "duration_s": round(step.duration_s, 3),
+                        "summary": step.summary,
+                        "detail": step.detail,
+                    }
+                    for step in result.step_results
+                ],
             }
             for result in results
         ],
     }
+    if include_stats:
+        stats = collect_time_stats(results)
+        summary["stats"] = [
+            {
+                "func": s.func,
+                "count": s.count,
+                "total_s": round(s.total_s, 3),
+                "min_s": round(s.min_s, 3),
+                "max_s": round(s.max_s, 3),
+                "avg_s": round(s.avg_s, 3),
+            }
+            for s in stats
+        ]
+    return summary
 
 
 def main() -> int:
@@ -992,7 +1080,15 @@ def main() -> int:
     if is_batch:
         print_summary(results)
 
-    print(json.dumps(build_json_summary(results), ensure_ascii=True, separators=(",", ":")))
+    if args.stats:
+        stats = collect_time_stats(results)
+        print_time_stats(stats, results)
+
+    print(json.dumps(
+        build_json_summary(results, include_stats=args.stats),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ))
 
     if all(result.status == "pass" for result in results):
         return 0
