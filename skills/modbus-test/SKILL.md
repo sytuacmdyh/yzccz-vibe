@@ -23,6 +23,7 @@ The user may provide:
 - **--port**: Serial port (default: auto-detect)
 - **--baudrate**: Baud rate (default: 115200)
 - **--slave-id**: Modbus slave ID (default: 1)
+- **--time-addr**: Device logic time register address (default: 4399)
 - **--session-timeout**: Maximum run time in seconds for the whole session (default: 120)
 - **--recursive**: Recursively search subdirectories for CSV files
 - **--dry-run**: Parse only, no Modbus I/O
@@ -35,9 +36,9 @@ The user may provide:
 3. **Build command**:
    ```bash
    uv run --with "pymodbus>=3.0,<4.0" --with "pyserial>=3.5,<4.0" \
-     ~/.claude/skills/modbus-test/scripts/modbus_test.py <path> --port <port> [--baudrate 115200] [--slave-id 1] [--recursive]
+     ~/.claude/skills/modbus-test/scripts/modbus_test.py <path> --port <port> [--baudrate 115200] [--slave-id 1] [--time-addr 4399] [--recursive]
    ```
-   Add `--dry-run` or `--continue-on-fail` if user requested.
+   Add `--dry-run`, `--continue-on-fail`, or `--time-addr` if user requested.
 4. **Show command**: Display the full command before execution.
 5. **Execute**: Run the command. Default timeout: 120s for the entire session. When specifying `--session-timeout`, reserve enough margin based on test case count and content (e.g., `delay`/`wait` durations, write retry overhead).
 6. **Summarize**: Parse output and present a summary table to the user.
@@ -70,9 +71,10 @@ read,4250,350,Verify target temp
 |-----------|----------|
 | `write` | Write single holding register; on failure wait 1s and retry up to 3 times |
 | `read` | Read holding register and compare (exact/range/bit) |
-| `delay` | Sleep (address=0: use value as seconds; address!=0: add register value) |
-| `wait` | Poll register until match or timeout; supports per-step timeout overrides |
-| `read_start_time` | Read register 3080 as elapsed time baseline |
+| `delay` | Sleep (address=0: use value as seconds; address!=0: add register value); **host wall-clock time** |
+| `wait` | Poll register until match or timeout; supports per-step `timeout=` (host time) or `logic_timeout=` (device time) |
+| `read_start_time` | Read register at `--time-addr` (default 4399) as elapsed time observation baseline |
+| `logic_delay` | Poll device logic time register until elapsed seconds; address=0 uses `--time-addr`; **device logic time** |
 
 ### Read Value Formats
 
@@ -85,14 +87,21 @@ read,4250,350,Verify target temp
 - `1`: use global `--wait-timeout` and `--wait-interval`
 - `10,500`: range match with global wait settings
 - `b3`: bit match with global wait settings
-- `1;timeout=8`: exact match with an 8 second per-step timeout
+- `1;timeout=8`: exact match with an 8 second per-step timeout (**host wall-clock time**)
 - `10,500;timeout=12;interval=0.2`: range match with a 12 second timeout and 0.2 second polling interval
 - `b3;timeout=5`: bit match with a 5 second per-step timeout
+- `1;logic_timeout=10`: exact match with a 10 second device logic time timeout
+- `10,500;logic_timeout=15;interval=0.5`: range match with 15s device logic timeout and 0.5s polling interval
 
 When inline wait options are used:
-- `timeout` is required and must be greater than 0
-- `interval` is optional and must be greater than 0
+- Exactly one of `timeout` or `logic_timeout` is required (mutually exclusive)
+- `timeout` uses host wall-clock time; `logic_timeout` uses device logic time from `--time-addr`
+- `interval` is optional, must be > 0, uses host wall-clock time
 - Inline wait settings override the global wait loop for that CSV row only
+
+### Device Logic Time Contract
+
+The register at `--time-addr` (default 4399) is a **uint16 seconds counter** that increments each second and wraps from 65535 to 0. Logic elapsed is computed as `(now - start) & 0xFFFF`. Fractional logic durations (e.g. `0.5`) are rounded up with `math.ceil` to at least 1 second, since the register granularity is 1 second.
 
 ## Constraints
 

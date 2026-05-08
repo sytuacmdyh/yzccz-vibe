@@ -7,6 +7,7 @@ import argparse
 import csv
 import glob
 import json
+import math
 import platform
 import re
 import sys
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_START_TIME_ADDR = 3080
+DEFAULT_TIME_ADDR = 4399
 DEFAULT_CLIENT_TIMEOUT_S = 3.0
 WRITE_RETRY_COUNT = 3
 WRITE_RETRY_DELAY_S = 1.0
@@ -25,12 +26,14 @@ FUNC_READ = "read"
 FUNC_DELAY = "delay"
 FUNC_WAIT = "wait"
 FUNC_READ_START_TIME = "read_start_time"
+FUNC_LOGIC_DELAY = "logic_delay"
 VALID_FUNCS = {
     FUNC_WRITE,
     FUNC_READ,
     FUNC_DELAY,
     FUNC_WAIT,
     FUNC_READ_START_TIME,
+    FUNC_LOGIC_DELAY,
 }
 
 
@@ -85,6 +88,7 @@ class ExecutionContext:
     session_deadline: float | None
     dry_run: bool
     start_time_value: int | None = None
+    time_addr: int = DEFAULT_TIME_ADDR
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,7 @@ class WaitSpec:
     expected: Any
     timeout_s: float | None = None
     interval_s: float | None = None
+    logic_timeout_s: float | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,6 +108,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", default="auto", help="Serial port path or auto")
     parser.add_argument("--baudrate", type=int, default=115200, help="Serial baudrate")
     parser.add_argument("--slave-id", type=int, default=1, help="Modbus device_id")
+    parser.add_argument(
+        "--time-addr",
+        type=int,
+        default=DEFAULT_TIME_ADDR,
+        help=f"Device logic time register address (default: {DEFAULT_TIME_ADDR})",
+    )
     parser.add_argument(
         "--wait-timeout",
         type=int,
@@ -152,6 +163,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--baudrate must be >= 1")
     if args.slave_id < 0:
         parser.error("--slave-id must be >= 0")
+    if args.time_addr < 0:
+        parser.error("--time-addr must be >= 0")
     return args
 
 
@@ -277,6 +290,8 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
                 parse_int(value_text, "write value", row_num)
             elif func == FUNC_DELAY:
                 parse_float(value_text, "delay seconds", row_num)
+            elif func == FUNC_LOGIC_DELAY:
+                parse_positive_float(value_text, "logic delay seconds", row_num)
             elif func == FUNC_READ:
                 parse_expected(value_text, row_num)
             elif func == FUNC_WAIT:
@@ -369,6 +384,10 @@ def sleep_with_session_check(ctx: ExecutionContext, duration_s: float) -> None:
         time.sleep(min(0.2, end_time - time.monotonic()))
 
 
+def logic_elapsed(start: int, now: int) -> int:
+    return (now - start) & 0xFFFF
+
+
 def read_register(client: Any, slave_id: int, addr: int) -> tuple[bool, int | None, str]:
     try:
         result = client.read_holding_registers(address=addr, count=1, device_id=slave_id)
@@ -436,6 +455,7 @@ def parse_wait_value(raw_value: str, row_num: int) -> WaitSpec:
     kind, expected = parse_expected(expected_text, row_num)
     timeout_s: float | None = None
     interval_s: float | None = None
+    logic_timeout_s: float | None = None
     seen_keys: set[str] = set()
 
     for option in parts[1:]:
@@ -461,11 +481,19 @@ def parse_wait_value(raw_value: str, row_num: int) -> WaitSpec:
         if key == "interval":
             interval_s = parse_positive_float(option_value, "wait interval", row_num)
             continue
+        if key == "logic_timeout":
+            logic_timeout_s = parse_positive_float(option_value, "logic timeout", row_num)
+            continue
         raise CsvParseError(f"row {row_num}: unsupported wait option {key!r}")
 
-    if timeout_s is None:
+    if timeout_s is not None and logic_timeout_s is not None:
         raise CsvParseError(
-            f"row {row_num}: wait option 'timeout' is required when using inline wait options"
+            f"row {row_num}: 'timeout' and 'logic_timeout' cannot both be specified"
+        )
+    if timeout_s is None and logic_timeout_s is None:
+        raise CsvParseError(
+            f"row {row_num}: 'timeout' or 'logic_timeout' is required "
+            f"when using inline wait options"
         )
 
     return WaitSpec(
@@ -473,6 +501,7 @@ def parse_wait_value(raw_value: str, row_num: int) -> WaitSpec:
         expected=expected,
         timeout_s=timeout_s,
         interval_s=interval_s,
+        logic_timeout_s=logic_timeout_s,
     )
 
 
@@ -506,17 +535,19 @@ def format_wait_summary(addr: int, wait_spec: WaitSpec) -> str:
     summary = f"wait {addr} expected={expected_label(wait_spec.kind, wait_spec.expected)}"
     if wait_spec.timeout_s is not None:
         summary += f" timeout={format_seconds(wait_spec.timeout_s)}s"
-        if wait_spec.interval_s is not None:
-            summary += f" interval={format_seconds(wait_spec.interval_s)}s"
+    if wait_spec.logic_timeout_s is not None:
+        summary += f" logic_timeout={format_seconds(wait_spec.logic_timeout_s)}s"
+    if wait_spec.interval_s is not None:
+        summary += f" interval={format_seconds(wait_spec.interval_s)}s"
     return summary
 
 
 def build_wait_pass_detail(actual: int, ctx: ExecutionContext, label: str) -> str:
     detail = f"expected={label} actual={actual}"
     if ctx.start_time_value is not None:
-        ok_now, now_value, _ = read_register(ctx.client, ctx.slave_id, DEFAULT_START_TIME_ADDR)
+        ok_now, now_value, _ = read_register(ctx.client, ctx.slave_id, ctx.time_addr)
         if ok_now and now_value is not None:
-            detail += f" elapsed={now_value - ctx.start_time_value}"
+            detail += f" elapsed={logic_elapsed(ctx.start_time_value, now_value)}"
     return detail
 
 
@@ -594,6 +625,41 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
         sleep_with_session_check(ctx, total_delay)
         return StepResult(index, step.func, "PASS", summary)
 
+    if step.func == FUNC_LOGIC_DELAY:
+        target_logic_s = float(step.value)
+        logic_addr = step.addr if step.addr != 0 else ctx.time_addr
+        logic_limit = math.ceil(target_logic_s)
+        summary = f"logic_delay {format_seconds(target_logic_s)}s"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+
+        ok_start, logic_start, err_start = read_register(
+            ctx.client, ctx.slave_id, logic_addr
+        )
+        if not ok_start or logic_start is None:
+            return StepResult(
+                index, step.func, "FAIL", summary,
+                f"logic time read failed: {err_start}",
+            )
+
+        while True:
+            ensure_session_time(ctx)
+            ok_t, logic_now, err_t = read_register(
+                ctx.client, ctx.slave_id, logic_addr
+            )
+            if not ok_t or logic_now is None:
+                return StepResult(
+                    index, step.func, "FAIL", summary,
+                    f"logic time read failed: {err_t}",
+                )
+            le = logic_elapsed(logic_start, logic_now)
+            if le >= logic_limit:
+                return StepResult(
+                    index, step.func, "PASS", summary,
+                    f"logic_elapsed={le}s",
+                )
+            sleep_with_session_check(ctx, ctx.wait_interval)
+
     if step.func == FUNC_READ:
         kind, expected = parse_expected(step.value, step.row_num)
         label = expected_label(kind, expected)
@@ -617,7 +683,7 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
 
         last_actual: int | None = None
         last_error = ""
-        if wait_spec.timeout_s is None:
+        if wait_spec.timeout_s is None and wait_spec.logic_timeout_s is None:
             for attempt in range(1, ctx.wait_timeout + 1):
                 ensure_session_time(ctx)
                 ok, actual, error = read_register(ctx.client, ctx.slave_id, step.addr)
@@ -639,48 +705,104 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
             detail = last_error or f"expected={label} actual={last_actual}"
             return StepResult(index, step.func, "FAIL", summary, detail)
 
-        wait_started = time.monotonic()
-        deadline = wait_started + wait_spec.timeout_s
-        poll_interval = wait_spec.interval_s
-        if poll_interval is None:
-            poll_interval = ctx.wait_interval
+        if wait_spec.timeout_s is not None:
+            wait_started = time.monotonic()
+            deadline = wait_started + wait_spec.timeout_s
+            poll_interval = wait_spec.interval_s
+            if poll_interval is None:
+                poll_interval = ctx.wait_interval
 
-        while True:
-            ensure_session_time(ctx)
-            ok, actual, error = read_register(ctx.client, ctx.slave_id, step.addr)
-            if ok and actual is not None:
-                last_actual = actual
-                if matches_expected(actual, wait_spec.kind, wait_spec.expected):
-                    detail = build_wait_pass_detail(actual, ctx, label)
-                    return StepResult(index, step.func, "PASS", summary, detail)
-                last_error = f"expected={label} actual={actual}"
-            else:
-                last_error = error or "read failed"
-
-            now = time.monotonic()
-            if now >= deadline:
-                break
-
-            end_sleep = min(now + poll_interval, deadline)
-            while time.monotonic() < end_sleep:
+            while True:
                 ensure_session_time(ctx)
-                time.sleep(min(0.2, end_sleep - time.monotonic()))
+                ok, actual, error = read_register(ctx.client, ctx.slave_id, step.addr)
+                if ok and actual is not None:
+                    last_actual = actual
+                    if matches_expected(actual, wait_spec.kind, wait_spec.expected):
+                        detail = build_wait_pass_detail(actual, ctx, label)
+                        return StepResult(index, step.func, "PASS", summary, detail)
+                    last_error = f"expected={label} actual={actual}"
+                else:
+                    last_error = error or "read failed"
 
-        detail = build_wait_timeout_detail(
-            label=label,
-            last_actual=last_actual,
-            last_error=last_error,
-            elapsed_s=time.monotonic() - wait_started,
-            timeout_s=wait_spec.timeout_s,
-        )
-        return StepResult(index, step.func, "FAIL", summary, detail)
+                now = time.monotonic()
+                if now >= deadline:
+                    break
+
+                end_sleep = min(now + poll_interval, deadline)
+                while time.monotonic() < end_sleep:
+                    ensure_session_time(ctx)
+                    time.sleep(min(0.2, end_sleep - time.monotonic()))
+
+            detail = build_wait_timeout_detail(
+                label=label,
+                last_actual=last_actual,
+                last_error=last_error,
+                elapsed_s=time.monotonic() - wait_started,
+                timeout_s=wait_spec.timeout_s,
+            )
+            return StepResult(index, step.func, "FAIL", summary, detail)
+
+        if wait_spec.logic_timeout_s is not None:
+            ok_start, logic_start, err_start = read_register(
+                ctx.client, ctx.slave_id, ctx.time_addr
+            )
+            if not ok_start or logic_start is None:
+                return StepResult(
+                    index, step.func, "FAIL", summary,
+                    f"logic time read failed: {err_start}",
+                )
+
+            poll_interval = wait_spec.interval_s
+            if poll_interval is None:
+                poll_interval = ctx.wait_interval
+            logic_limit = math.ceil(wait_spec.logic_timeout_s)
+
+            while True:
+                ensure_session_time(ctx)
+                ok_t, logic_now, err_t = read_register(
+                    ctx.client, ctx.slave_id, ctx.time_addr
+                )
+                if not ok_t or logic_now is None:
+                    return StepResult(
+                        index, step.func, "FAIL", summary,
+                        f"expected={label} actual={last_actual} logic time read failed: {err_t}",
+                    )
+
+                le = logic_elapsed(logic_start, logic_now)
+                if le >= logic_limit:
+                    ok, actual, _ = read_register(
+                        ctx.client, ctx.slave_id, step.addr
+                    )
+                    if ok and actual is not None:
+                        last_actual = actual
+                    return StepResult(
+                        index, step.func, "FAIL", summary,
+                        f"expected={label} actual={last_actual} "
+                        f"logic_elapsed={le}s logic_timeout={logic_limit}s",
+                    )
+
+                ok, actual, error = read_register(
+                    ctx.client, ctx.slave_id, step.addr
+                )
+                if ok and actual is not None:
+                    last_actual = actual
+                    if matches_expected(actual, wait_spec.kind, wait_spec.expected):
+                        return StepResult(
+                            index, step.func, "PASS", summary,
+                            f"expected={label} actual={actual} logic_elapsed={le}s",
+                        )
+                    last_error = f"expected={label} actual={actual}"
+                else:
+                    last_error = error or "read failed"
+
+                sleep_with_session_check(ctx, poll_interval)
 
     if step.func == FUNC_READ_START_TIME:
-        summary = f"read_start_time {DEFAULT_START_TIME_ADDR}"
+        summary = f"read_start_time {ctx.time_addr}"
         if ctx.dry_run:
             return StepResult(index, step.func, "PASS", summary)
 
-        ok, actual, error = read_register(ctx.client, ctx.slave_id, DEFAULT_START_TIME_ADDR)
+        ok, actual, error = read_register(ctx.client, ctx.slave_id, ctx.time_addr)
         if not ok or actual is None:
             return StepResult(index, step.func, "FAIL", summary, error)
         ctx.start_time_value = actual
@@ -833,6 +955,7 @@ def main() -> int:
         wait_interval=args.wait_interval,
         session_deadline=session_deadline,
         dry_run=args.dry_run,
+        time_addr=args.time_addr,
     )
 
     results: list[FileResult] = []
