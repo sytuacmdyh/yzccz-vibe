@@ -12,7 +12,10 @@ import platform
 import re
 import sys
 import time
-from dataclasses import dataclass
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +30,11 @@ FUNC_DELAY = "delay"
 FUNC_WAIT = "wait"
 FUNC_READ_START_TIME = "read_start_time"
 FUNC_LOGIC_DELAY = "logic_delay"
+FUNC_SIM_CONTROL = "sim_control"
+FUNC_SIM_POWER = "sim_power"
+FUNC_SIM_READ = "sim_read"
+FUNC_SIM_WAIT = "sim_wait"
+SIM_FUNCS = {FUNC_SIM_CONTROL, FUNC_SIM_POWER, FUNC_SIM_READ, FUNC_SIM_WAIT}
 VALID_FUNCS = {
     FUNC_WRITE,
     FUNC_READ,
@@ -34,7 +42,27 @@ VALID_FUNCS = {
     FUNC_WAIT,
     FUNC_READ_START_TIME,
     FUNC_LOGIC_DELAY,
+    FUNC_SIM_CONTROL,
+    FUNC_SIM_POWER,
+    FUNC_SIM_READ,
+    FUNC_SIM_WAIT,
 }
+
+SIM_PROP_MAP: dict[str, str] = {
+    "power": "2_1",
+    "mode": "2_3",
+    "fan_level": "2_4",
+    "target_temp": "2_5",
+    "indoor_temp": "3_1",
+    "indoor_humi": "3_2",
+    "fault_status": "2_11",
+    "cur_fan_speed": "3_4",
+    "comp_status": "3_5",
+}
+SIM_BOOL_PROPS = {"power"}
+SIM_CONTROL_WHITELIST = {"power", "mode", "fan_level", "target_temp"}
+SIM_POWER_ON_VALUES = {"on", "true", "1"}
+SIM_POWER_OFF_VALUES = {"off", "false", "0"}
 
 
 class CsvParseError(Exception):
@@ -47,6 +75,10 @@ class ConnectionSetupError(Exception):
 
 class SessionTimeoutError(Exception):
     """Raised when the run exceeds the configured session timeout."""
+
+
+class SimApiError(Exception):
+    """Raised on DeviceSimulator API call failure."""
 
 
 @dataclass(frozen=True)
@@ -100,6 +132,14 @@ class ExecutionContext:
     dry_run: bool
     start_time_value: int | None = None
     time_addr: int = DEFAULT_TIME_ADDR
+    sim: SimContext | None = None
+
+
+@dataclass
+class SimContext:
+    api_base: str
+    http_timeout: float
+    _index_to_sn: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -129,7 +169,7 @@ def parse_args() -> argparse.Namespace:
         "--wait-timeout",
         type=int,
         default=50,
-        help="Maximum wait poll attempts before FAIL",
+        help="Maximum wait poll attempts (Modbus wait) or seconds (sim_wait) before FAIL",
     )
     parser.add_argument(
         "--wait-interval",
@@ -168,6 +208,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print per-function-type timing statistics (default: disabled)",
     )
+    parser.add_argument(
+        "--sim-api",
+        default="",
+        help="DeviceSimulator API base URL (e.g. http://127.0.0.1:9090)",
+    )
+    parser.add_argument(
+        "--sim-http-timeout",
+        type=float,
+        default=5.0,
+        help="HTTP request timeout for DeviceSimulator API (default: 5.0s)",
+    )
     args = parser.parse_args()
     if args.wait_timeout < 1:
         parser.error("--wait-timeout must be >= 1")
@@ -181,6 +232,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--slave-id must be >= 0")
     if args.time_addr < 0:
         parser.error("--time-addr must be >= 0")
+    if args.sim_http_timeout <= 0:
+        parser.error("--sim-http-timeout must be > 0")
     return args
 
 
@@ -299,6 +352,11 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
             if func != FUNC_READ_START_TIME or addr_text:
                 addr = parse_int(addr_text or "0", "target address", row_num)
 
+            if func in SIM_FUNCS and addr <= 0:
+                raise CsvParseError(
+                    f"row {row_num}: DeviceIndex must be > 0 for {func}"
+                )
+
             if not value_text and func != FUNC_READ_START_TIME:
                 raise CsvParseError(f"row {row_num}: missing target value")
 
@@ -312,6 +370,14 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
                 parse_expected(value_text, row_num)
             elif func == FUNC_WAIT:
                 parse_wait_value(value_text, row_num)
+            elif func == FUNC_SIM_CONTROL:
+                _validate_sim_control_value(value_text, row_num)
+            elif func == FUNC_SIM_POWER:
+                _validate_sim_power_value(value_text, row_num)
+            elif func == FUNC_SIM_READ:
+                _validate_sim_read_value(value_text, row_num)
+            elif func == FUNC_SIM_WAIT:
+                _validate_sim_wait_value(value_text, row_num)
 
             steps.append(
                 Step(
@@ -539,6 +605,260 @@ def matches_expected(actual: int, kind: str, expected: Any) -> bool:
     if kind == "bit":
         return (actual & (1 << expected)) != 0
     return False
+
+
+def _resolve_sim_prop_key(name_or_key: str) -> str:
+    return SIM_PROP_MAP.get(name_or_key, name_or_key)
+
+
+def _validate_sim_control_value(raw: str, row_num: int) -> None:
+    if ":" not in raw:
+        raise CsvParseError(f"row {row_num}: sim_control value must be property:value")
+    prop, val = raw.split(":", 1)
+    if not prop:
+        raise CsvParseError(f"row {row_num}: sim_control missing property name")
+    if prop not in SIM_CONTROL_WHITELIST:
+        raise CsvParseError(
+            f"row {row_num}: unknown sim_control property {prop!r}; "
+            f"expected one of {', '.join(sorted(SIM_CONTROL_WHITELIST))}"
+        )
+    if prop == "power":
+        if val.lower() not in SIM_POWER_ON_VALUES | SIM_POWER_OFF_VALUES:
+            raise CsvParseError(
+                f"row {row_num}: sim_control power value must be true/false"
+            )
+    elif prop == "target_temp":
+        try:
+            v = int(val)
+        except ValueError:
+            raise CsvParseError(
+                f"row {row_num}: sim_control target_temp must be an integer"
+            )
+        if not 16 <= v <= 32:
+            raise CsvParseError(
+                f"row {row_num}: sim_control target_temp must be 16..32, got {v}"
+            )
+    else:
+        try:
+            int(val)
+        except ValueError:
+            raise CsvParseError(
+                f"row {row_num}: sim_control {prop} value must be an integer"
+            )
+
+
+def _validate_sim_power_value(raw: str, row_num: int) -> None:
+    if raw.lower() not in SIM_POWER_ON_VALUES | SIM_POWER_OFF_VALUES:
+        raise CsvParseError(
+            f"row {row_num}: sim_power value must be on/off/true/false/1/0"
+        )
+
+
+def _validate_sim_read_value(raw: str, row_num: int) -> None:
+    if ":" not in raw:
+        raise CsvParseError(f"row {row_num}: sim_read value must be property:expected")
+    prop, expected_text = raw.split(":", 1)
+    if not prop:
+        raise CsvParseError(f"row {row_num}: sim_read missing property name")
+    if prop not in SIM_PROP_MAP:
+        raise CsvParseError(
+            f"row {row_num}: unknown sim_read property {prop!r}; "
+            f"expected one of {', '.join(sorted(SIM_PROP_MAP))}"
+        )
+    if prop in SIM_BOOL_PROPS:
+        if expected_text.strip().lower() not in SIM_POWER_ON_VALUES | SIM_POWER_OFF_VALUES:
+            raise CsvParseError(
+                f"row {row_num}: sim_read {prop} expected must be true/false/on/off/1/0, "
+                f"got {expected_text!r}"
+            )
+    else:
+        parse_expected(expected_text, row_num)
+
+
+def _validate_sim_wait_value(raw: str, row_num: int) -> None:
+    if ";" in raw:
+        main_part, *options = raw.split(";")
+    else:
+        main_part = raw
+        options = []
+    if ":" not in main_part:
+        raise CsvParseError(f"row {row_num}: sim_wait value must be property:expected")
+    prop, expected_text = main_part.split(":", 1)
+    if not prop:
+        raise CsvParseError(f"row {row_num}: sim_wait missing property name")
+    if prop not in SIM_PROP_MAP:
+        raise CsvParseError(
+            f"row {row_num}: unknown sim_wait property {prop!r}; "
+            f"expected one of {', '.join(sorted(SIM_PROP_MAP))}"
+        )
+    if prop in SIM_BOOL_PROPS:
+        if expected_text.strip().lower() not in SIM_POWER_ON_VALUES | SIM_POWER_OFF_VALUES:
+            raise CsvParseError(
+                f"row {row_num}: sim_wait {prop} expected must be true/false/on/off/1/0, "
+                f"got {expected_text!r}"
+            )
+    else:
+        parse_expected(expected_text, row_num)
+    seen_keys: set[str] = set()
+    for opt in options:
+        if not opt.strip():
+            raise CsvParseError(f"row {row_num}: empty sim_wait option")
+        if "=" not in opt:
+            raise CsvParseError(
+                f"row {row_num}: invalid sim_wait option {opt!r}; expected key=value"
+            )
+        raw_key, raw_val = opt.split("=", 1)
+        key = raw_key.strip().lower().replace("-", "_")
+        if not key:
+            raise CsvParseError(f"row {row_num}: invalid sim_wait option {opt!r}")
+        if key in seen_keys:
+            raise CsvParseError(f"row {row_num}: duplicate sim_wait option {key!r}")
+        seen_keys.add(key)
+        if key not in ("timeout", "interval"):
+            raise CsvParseError(f"row {row_num}: unsupported sim_wait option {key!r}")
+        try:
+            v = float(raw_val.strip())
+        except ValueError:
+            raise CsvParseError(
+                f"row {row_num}: sim_wait {key} must be a number, got {raw_val!r}"
+            )
+        if v <= 0:
+            raise CsvParseError(f"row {row_num}: sim_wait {key} must be > 0")
+
+
+def _sim_http_json(sim: SimContext, method: str, path: str, body: dict | None = None) -> Any:
+    url = sim.api_base.rstrip("/") + path
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=sim.http_timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise SimApiError(f"HTTP request failed: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SimApiError(f"invalid JSON response: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SimApiError(f"unexpected response shape: {type(payload).__name__}")
+    if not payload.get("ok", False):
+        raise SimApiError(payload.get("error", "unknown API error"))
+    return payload.get("data")
+
+
+def sim_resolve_sn(sim: SimContext, device_index: int) -> str:
+    if device_index in sim._index_to_sn:
+        return sim._index_to_sn[device_index]
+    devices = _sim_http_json(sim, "GET", "/api/devices")
+    if not isinstance(devices, list):
+        raise SimApiError("unexpected /api/devices response shape")
+    new_map: dict[int, str] = {}
+    for dev in devices:
+        sn = dev.get("sn", "")
+        idx = dev.get("device_index", 0)
+        if idx and isinstance(idx, int) and idx > 0 and sn:
+            if idx in new_map:
+                raise SimApiError(
+                    f"duplicate device_index {idx} (sn={new_map[idx]} and sn={sn})"
+                )
+            new_map[idx] = sn
+    sim._index_to_sn.update(new_map)
+    if device_index in sim._index_to_sn:
+        return sim._index_to_sn[device_index]
+    available = sorted(sim._index_to_sn.keys())
+    raise SimApiError(
+        f"DeviceIndex {device_index} not found; available: {available}"
+    )
+
+
+def sim_read_property(sim: SimContext, sn: str, prop_key: str) -> Any:
+    path = f"/api/devices/{urllib.parse.quote(sn, safe='')}"
+    data = _sim_http_json(sim, "GET", path)
+    if not isinstance(data, dict):
+        raise SimApiError("device response has no data")
+    hw = data.get("hardware")
+    if not isinstance(hw, dict):
+        raise SimApiError("device response has no hardware snapshot")
+    if prop_key not in hw:
+        raise SimApiError(f"property {prop_key!r} not found in hardware snapshot")
+    return hw[prop_key]
+
+
+def sim_control_property(sim: SimContext, sn: str, prop: str, value: Any) -> None:
+    path = f"/api/devices/{urllib.parse.quote(sn, safe='')}/control"
+    _sim_http_json(sim, "POST", path, {"property": prop, "value": value})
+
+
+def sim_power_device(sim: SimContext, sn: str, on: bool) -> None:
+    path = f"/api/devices/{urllib.parse.quote(sn, safe='')}/power"
+    _sim_http_json(sim, "POST", path, {"on": on})
+
+
+def _parse_sim_control_value(raw: str) -> tuple[str, Any]:
+    prop, val_str = raw.split(":", 1)
+    if prop == "power":
+        return prop, val_str.lower() in SIM_POWER_ON_VALUES
+    return prop, int(val_str)
+
+
+def _parse_sim_power_value(raw: str) -> bool:
+    return raw.strip().lower() in SIM_POWER_ON_VALUES
+
+
+def _parse_sim_read_value(raw: str) -> tuple[str, str, Any, str]:
+    prop, expected_text = raw.split(":", 1)
+    prop_key = _resolve_sim_prop_key(prop)
+    if prop in SIM_BOOL_PROPS:
+        on = expected_text.strip().lower() in SIM_POWER_ON_VALUES
+        return prop_key, "exact", 1 if on else 0, str(1 if on else 0)
+    kind, expected = parse_expected(expected_text, 0)
+    label = expected_label(kind, expected)
+    return prop_key, kind, expected, label
+
+
+def _parse_sim_wait_value(raw: str) -> tuple[str, str, Any, str, float, float]:
+    prop = ""
+    expected_text = ""
+    timeout_s = 0.0
+    interval_s = 1.0
+    if ";" in raw:
+        main_part, *options = raw.split(";")
+    else:
+        main_part = raw
+        options = []
+    prop, expected_text = main_part.split(":", 1)
+    prop_key = _resolve_sim_prop_key(prop)
+    for opt in options:
+        k, v = opt.split("=", 1)
+        if k.strip().lower() == "timeout":
+            timeout_s = float(v.strip())
+        elif k.strip().lower() == "interval":
+            interval_s = float(v.strip())
+    if prop in SIM_BOOL_PROPS:
+        on = expected_text.strip().lower() in SIM_POWER_ON_VALUES
+        return prop_key, "exact", 1 if on else 0, str(1 if on else 0), timeout_s, interval_s
+    kind, expected = parse_expected(expected_text, 0)
+    label = expected_label(kind, expected)
+    return prop_key, kind, expected, label, timeout_s, interval_s
+
+
+def _normalize_sim_actual(prop_key: str, raw_value: Any) -> int:
+    try:
+        if prop_key in ("2_1",):
+            return 1 if raw_value else 0
+        return int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise SimApiError(
+            f"non-numeric hardware value for {prop_key}: {raw_value!r}"
+        ) from exc
+
+
+def requires_serial(step: Step) -> bool:
+    if step.func in SIM_FUNCS:
+        return False
+    if step.func == FUNC_DELAY:
+        return step.addr != 0
+    return True
 
 
 def format_seconds(value: float) -> str:
@@ -813,6 +1133,101 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
 
                 sleep_with_session_check(ctx, poll_interval)
 
+    if step.func == FUNC_SIM_CONTROL:
+        prop, value = _parse_sim_control_value(step.value)
+        summary = f"sim_control dev={step.addr} {prop}={value}"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        try:
+            sim = ctx.sim
+            if sim is None:
+                return StepResult(index, step.func, "FAIL", summary, "sim not initialized")
+            sn = sim_resolve_sn(sim, step.addr)
+            sim_control_property(sim, sn, prop, value)
+            return StepResult(index, step.func, "PASS", summary)
+        except SimApiError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_SIM_POWER:
+        on = _parse_sim_power_value(step.value)
+        summary = f"sim_power dev={step.addr} {'on' if on else 'off'}"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        try:
+            sim = ctx.sim
+            if sim is None:
+                return StepResult(index, step.func, "FAIL", summary, "sim not initialized")
+            sn = sim_resolve_sn(sim, step.addr)
+            sim_power_device(sim, sn, on)
+            return StepResult(index, step.func, "PASS", summary)
+        except SimApiError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_SIM_READ:
+        prop_key, kind, expected, label = _parse_sim_read_value(step.value)
+        summary = f"sim_read dev={step.addr} {label}"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        try:
+            sim = ctx.sim
+            if sim is None:
+                return StepResult(index, step.func, "FAIL", summary, "sim not initialized")
+            sn = sim_resolve_sn(sim, step.addr)
+            raw_val = sim_read_property(sim, sn, prop_key)
+            actual = _normalize_sim_actual(prop_key, raw_val)
+            detail = f"expected={label} actual={actual}"
+            if matches_expected(actual, kind, expected):
+                return StepResult(index, step.func, "PASS", summary, detail)
+            return StepResult(index, step.func, "FAIL", summary, detail)
+        except SimApiError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_SIM_WAIT:
+        prop_key, kind, expected, label, inline_timeout, interval_s = _parse_sim_wait_value(step.value)
+        timeout_s = inline_timeout if inline_timeout > 0 else float(ctx.wait_timeout)
+        summary = f"sim_wait dev={step.addr} {label} timeout={format_seconds(timeout_s)}s"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        try:
+            sim = ctx.sim
+            if sim is None:
+                return StepResult(index, step.func, "FAIL", summary, "sim not initialized")
+            sn = sim_resolve_sn(sim, step.addr)
+        except SimApiError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+        wait_started = time.monotonic()
+        deadline = wait_started + timeout_s
+        last_actual: int | None = None
+        last_error = ""
+        while True:
+            ensure_session_time(ctx)
+            try:
+                raw_val = sim_read_property(sim, sn, prop_key)
+                actual = _normalize_sim_actual(prop_key, raw_val)
+                last_actual = actual
+                if matches_expected(actual, kind, expected):
+                    return StepResult(
+                        index, step.func, "PASS", summary,
+                        f"expected={label} actual={actual}",
+                    )
+                last_error = f"expected={label} actual={actual}"
+            except SimApiError as exc:
+                last_error = str(exc)
+
+            if time.monotonic() >= deadline:
+                break
+            sleep_with_session_check(ctx, min(interval_s, deadline - time.monotonic()))
+
+        detail = build_wait_timeout_detail(
+            label=label,
+            last_actual=last_actual,
+            last_error=last_error,
+            elapsed_s=time.monotonic() - wait_started,
+            timeout_s=timeout_s,
+        )
+        return StepResult(index, step.func, "FAIL", summary, detail)
+
     if step.func == FUNC_READ_START_TIME:
         summary = f"read_start_time {ctx.time_addr}"
         if ctx.dry_run:
@@ -855,7 +1270,7 @@ def run_file(
         step_started = time.monotonic()
         try:
             result = execute_step(step, ctx)
-        except SessionTimeoutError as exc:
+        except (SessionTimeoutError, SimApiError) as exc:
             result = StepResult(step.row_num, step.func, "FAIL", step.func, str(exc))
         result.duration_s = time.monotonic() - step_started
 
@@ -1025,9 +1440,46 @@ def main() -> int:
 
     use_relative = args.recursive and is_batch
 
+    has_sim_steps = any(
+        step.func in SIM_FUNCS
+        for _, steps in parsed_files
+        for step in steps
+    )
+    needs_serial = any(
+        requires_serial(step)
+        for _, steps in parsed_files
+        for step in steps
+    )
+
+    if has_sim_steps and not args.sim_api and not args.dry_run:
+        print("ERROR: CSV contains sim_* operations but --sim-api is not set", file=sys.stderr)
+        return 2
+
+    sim_ctx: SimContext | None = None
+    if args.sim_api and has_sim_steps and not args.dry_run:
+        sim_ctx = SimContext(api_base=args.sim_api, http_timeout=args.sim_http_timeout)
+        try:
+            devices = _sim_http_json(sim_ctx, "GET", "/api/devices")
+            if isinstance(devices, list):
+                for dev in devices:
+                    sn = dev.get("sn", "")
+                    idx = dev.get("device_index", 0)
+                    if idx and isinstance(idx, int) and idx > 0 and sn:
+                        if idx in sim_ctx._index_to_sn:
+                            print(
+                                f"ERROR: duplicate device_index {idx} "
+                                f"(sn={sim_ctx._index_to_sn[idx]} and sn={sn})",
+                                file=sys.stderr,
+                            )
+                            return 2
+                        sim_ctx._index_to_sn[idx] = sn
+        except SimApiError as exc:
+            print(f"ERROR: DeviceSimulator API unreachable: {exc}", file=sys.stderr)
+            return 2
+
     client = None
     port = args.port
-    if not args.dry_run:
+    if needs_serial and not args.dry_run:
         try:
             port = detect_port(args.port)
             client = create_client(port, args.baudrate)
@@ -1046,6 +1498,7 @@ def main() -> int:
         session_deadline=session_deadline,
         dry_run=args.dry_run,
         time_addr=args.time_addr,
+        sim=sim_ctx,
     )
 
     results: list[FileResult] = []
