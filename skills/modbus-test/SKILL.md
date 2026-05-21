@@ -32,6 +32,8 @@ The user may provide:
 - **--stats**: Print per-function-type timing statistics (count/total/avg/min/max)
 - **--sim-api**: DeviceSimulator API base URL (default: `http://127.0.0.1:9090`)
 - **--sim-http-timeout**: HTTP request timeout for DeviceSimulator API (default: 5.0s)
+- **--log-dir**: Directory for log files (default: `./logs`)
+- **--no-log**: Disable file logging
 
 ## Execution Steps
 
@@ -44,6 +46,7 @@ The user may provide:
    ```
    Add `--dry-run`, `--continue-on-fail`, `--stats`, or `--time-addr` if user requested.
    Add `--sim-api http://127.0.0.1:9090` when CSV contains `sim_*` operations.
+   Add `--log-dir <path>` to customize log output directory. Add `--no-log` to disable file logging.
 4. **Show command**: Display the full command before execution.
 5. **Execute**: Run the command. Default timeout: 120s for the entire session. When specifying `--session-timeout`, reserve enough margin based on test case count and content (e.g., `delay`/`wait` durations, write retry overhead).
 6. **Summarize**: Parse output and present a summary table to the user.
@@ -56,6 +59,8 @@ The script outputs step-by-step results (PASS/FAIL) and a summary.
 **Folder batch**: Shows per-file results + summary table + JSON.
 **With `--stats`**: Adds a per-function-type timing table (write/read/delay/wait etc.) with count, total, avg, min, max columns.
 
+**File logging**: By default, a detailed log file is written to `./logs/modbus_test_YYYYMMDD_HHMMSS.log` containing step-by-step execution details, timing, and errors. The log file path is printed to stderr at startup.
+
 ## CSV Format
 
 ```csv
@@ -64,6 +69,7 @@ write,607,1,Force restart
 delay,0,5,Wait 5s
 write,615,0,Heating mode
 write,636,350,Target temp 35.0C
+write_multi,600,"1,0,350",Write 3 consecutive regs
 delay,0,1,Wait 1s
 write,600,1,Power on
 delay,0,2,Wait 2s
@@ -76,6 +82,7 @@ read,4250,350,Verify target temp
 | Operation | Behavior |
 |-----------|----------|
 | `write` | Write single holding register; on failure wait 1s and retry up to 3 times |
+| `write_multi` | Write multiple consecutive holding registers (FC16); address=starting register, value=comma-separated integers (must be quoted in CSV); max 123 registers per step, each value 0–65535; on failure wait 1s and retry up to 3 times |
 | `read` | Read holding register and compare (exact/range/bit) |
 | `delay` | Sleep (address=0: use value as seconds; address!=0: add register value); **host wall-clock time** |
 | `wait` | Poll register until match or timeout; supports per-step `timeout=` (host time) or `logic_timeout=` (device time) |
@@ -165,6 +172,8 @@ sim_wait,1,indoor_temp:240;timeout=15,Wait indoor temp >= 24.0C
 
 > **CSV tip**: Range values containing commas must be quoted: `"indoor_temp:200,260"`, not `indoor_temp:200,260`.
 
+> **CSV tip**: `write_multi` values containing commas must be quoted: `write_multi,600,"1,2,3",Write 3 regs`, not `write_multi,600,1,2,3,Write 3 regs` (the latter splits across columns and triggers a parse error).
+
 ### Read Value Formats
 
 - Integer `350`: exact match
@@ -194,7 +203,7 @@ The register at `--time-addr` (default 4399) is a **uint16 seconds counter** tha
 
 ## Constraints
 
-- All register operations target holding registers (FC 03/06)
+- Read uses FC03, single write uses FC06, multi-register write uses FC16
 - Serial connection shared across entire run (no per-file reconnect)
 - Serial connection is skipped when CSV only contains `sim_*` and `delay(0)` operations (no serial port needed)
 - Device state carries over between files in batch mode

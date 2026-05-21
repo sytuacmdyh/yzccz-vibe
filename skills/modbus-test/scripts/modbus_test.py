@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
 import glob
 import json
+import logging
 import math
 import platform
 import re
@@ -25,6 +27,7 @@ DEFAULT_CLIENT_TIMEOUT_S = 3.0
 WRITE_RETRY_COUNT = 3
 WRITE_RETRY_DELAY_S = 1.0
 FUNC_WRITE = "write"
+FUNC_WRITE_MULTI = "write_multi"
 FUNC_READ = "read"
 FUNC_DELAY = "delay"
 FUNC_WAIT = "wait"
@@ -37,6 +40,7 @@ FUNC_SIM_WAIT = "sim_wait"
 SIM_FUNCS = {FUNC_SIM_CONTROL, FUNC_SIM_POWER, FUNC_SIM_READ, FUNC_SIM_WAIT}
 VALID_FUNCS = {
     FUNC_WRITE,
+    FUNC_WRITE_MULTI,
     FUNC_READ,
     FUNC_DELAY,
     FUNC_WAIT,
@@ -151,6 +155,37 @@ class WaitSpec:
     logic_timeout_s: float | None = None
 
 
+LOG_LOGGER_NAME = "modbus_test"
+
+
+def setup_logging(log_dir: str, no_log: bool) -> Path | None:
+    logger = logging.getLogger(LOG_LOGGER_NAME)
+    for h in logger.handlers[:]:
+        h.close()
+    logger.handlers.clear()
+    if no_log:
+        return None
+    log_path = Path(log_dir)
+    try:
+        log_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"WARNING: cannot create log dir {log_dir}: {exc}", file=sys.stderr)
+        return None
+    filename = f"modbus_test_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    file_path = log_path / filename
+    try:
+        handler = logging.FileHandler(file_path, encoding="utf-8")
+    except OSError as exc:
+        print(f"WARNING: cannot create log file {file_path}: {exc}", file=sys.stderr)
+        return None
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    print(f"Log: {file_path}", file=sys.stderr)
+    return file_path
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Modbus serial tests from a CSV file or a folder of CSV files."
@@ -218,6 +253,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=5.0,
         help="HTTP request timeout for DeviceSimulator API (default: 5.0s)",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default="./logs",
+        help="Directory for log files (default: ./logs)",
+    )
+    parser.add_argument(
+        "--no-log",
+        action="store_true",
+        help="Disable file logging",
     )
     args = parser.parse_args()
     if args.wait_timeout < 1:
@@ -287,8 +332,42 @@ def parse_int(raw: str, field_name: str, row_num: int) -> int:
         raise CsvParseError(f"row {row_num}: missing {field_name}")
     try:
         return int(float(text))
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         raise CsvParseError(f"row {row_num}: invalid {field_name}: {raw!r}") from exc
+
+
+FC16_MAX_COUNT = 123
+UINT16_MAX = 65535
+
+
+def parse_int_list(raw: str, field_name: str, row_num: int) -> list[int]:
+    """Parse comma-separated integers, e.g. '1,2,3' -> [1, 2, 3]."""
+    text = raw.strip()
+    if not text:
+        raise CsvParseError(f"row {row_num}: missing {field_name}")
+    parts = [p.strip() for p in text.split(",")]
+    values: list[int] = []
+    for part in parts:
+        if not part:
+            raise CsvParseError(f"row {row_num}: empty element in {field_name}")
+        try:
+            values.append(int(float(part)))
+        except (ValueError, OverflowError) as exc:
+            raise CsvParseError(
+                f"row {row_num}: invalid element in {field_name}: {part!r}"
+            ) from exc
+    if not values:
+        raise CsvParseError(f"row {row_num}: {field_name} must contain at least one integer")
+    if len(values) > FC16_MAX_COUNT:
+        raise CsvParseError(
+            f"row {row_num}: {field_name} count {len(values)} exceeds FC16 limit {FC16_MAX_COUNT}"
+        )
+    for v in values:
+        if not 0 <= v <= UINT16_MAX:
+            raise CsvParseError(
+                f"row {row_num}: {field_name} element {v} outside uint16 range 0-{UINT16_MAX}"
+            )
+    return values
 
 
 def parse_float(raw: str, field_name: str, row_num: int) -> float:
@@ -337,6 +416,12 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
             if not any(values):
                 continue
 
+            if None in row:
+                raise CsvParseError(
+                    f"row {row_num}: extra columns detected — likely an unquoted value "
+                    f"containing commas"
+                )
+
             func = str(row.get(func_col, "")).strip().lower()
             if func not in VALID_FUNCS:
                 raise CsvParseError(
@@ -362,6 +447,8 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
 
             if func == FUNC_WRITE:
                 parse_int(value_text, "write value", row_num)
+            elif func == FUNC_WRITE_MULTI:
+                parse_int_list(value_text, "write_multi value", row_num)
             elif func == FUNC_DELAY:
                 parse_float(value_text, "delay seconds", row_num)
             elif func == FUNC_LOGIC_DELAY:
@@ -456,6 +543,7 @@ def create_client(port: str, baudrate: int) -> Any:
 
 def ensure_session_time(ctx: ExecutionContext) -> None:
     if ctx.session_deadline is not None and time.monotonic() > ctx.session_deadline:
+        logging.getLogger(LOG_LOGGER_NAME).warning("Session timeout exceeded")
         raise SessionTimeoutError("session timeout exceeded")
 
 
@@ -489,6 +577,19 @@ def read_register(client: Any, slave_id: int, addr: int) -> tuple[bool, int | No
 def write_register(client: Any, slave_id: int, addr: int, value: int) -> tuple[bool, str]:
     try:
         result = client.write_register(address=addr, value=value, device_id=slave_id)
+    except Exception as exc:  # pragma: no cover - hardware dependent
+        return False, str(exc)
+
+    if result is None:
+        return False, "empty Modbus response"
+    if result.isError():
+        return False, str(result)
+    return True, ""
+
+
+def write_registers(client: Any, slave_id: int, addr: int, values: list[int]) -> tuple[bool, str]:
+    try:
+        result = client.write_registers(address=addr, values=values, device_id=slave_id)
     except Exception as exc:  # pragma: no cover - hardware dependent
         return False, str(exc)
 
@@ -934,6 +1035,31 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
             f"{last_error} attempts={max_attempts}",
         )
 
+    if step.func == FUNC_WRITE_MULTI:
+        values = parse_int_list(step.value, "write_multi value", step.row_num)
+        value_label = ",".join(str(v) for v in values)
+        summary = f"write_multi {step.addr}={value_label}"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        max_attempts = WRITE_RETRY_COUNT + 1
+        last_error = ""
+        for attempt in range(1, max_attempts + 1):
+            ensure_session_time(ctx)
+            ok, error = write_registers(ctx.client, ctx.slave_id, step.addr, values)
+            if ok:
+                detail = "" if attempt == 1 else f"attempts={attempt}"
+                return StepResult(index, step.func, "PASS", summary, detail)
+            last_error = error or "write_multi failed"
+            if attempt < max_attempts:
+                sleep_with_session_check(ctx, WRITE_RETRY_DELAY_S)
+        return StepResult(
+            index,
+            step.func,
+            "FAIL",
+            summary,
+            f"{last_error} attempts={max_attempts}",
+        )
+
     if step.func == FUNC_DELAY:
         base_delay = float(step.value)
         total_delay = base_delay
@@ -1258,6 +1384,8 @@ def run_file(
     display_name: str | None = None,
 ) -> FileResult:
     name = display_name or csv_path.name
+    logger = logging.getLogger(LOG_LOGGER_NAME)
+    logger.info("Running file: %s (%d steps)", name, len(steps))
     if verbose:
         print(f"=== TEST: {name} ===")
     started = time.monotonic()
@@ -1275,6 +1403,10 @@ def run_file(
         result.duration_s = time.monotonic() - step_started
 
         step_results.append(result)
+        logger.info("Step %d/%d %s %s [%s] %.3fs",
+                    step_number, len(steps),
+                    result.summary, result.detail, result.status,
+                    result.duration_s)
         if verbose:
             print_step(step_number, result)
         if result.status == "PASS":
@@ -1289,6 +1421,8 @@ def run_file(
     if error:
         status = "error"
 
+    logger.info("File result: %s %s (%d/%d passed) %.3fs",
+                name, status.upper(), passed, total, duration_s)
     if verbose:
         verdict = status.upper()
         print(f"=== RESULT: {verdict} ({passed}/{total} passed) ===")
@@ -1430,13 +1564,23 @@ def build_json_summary(
 
 def main() -> int:
     args = parse_args()
+    setup_logging(args.log_dir, args.no_log)
+    logger = logging.getLogger(LOG_LOGGER_NAME)
+
+    logger.info("modbus_test started: path=%s baudrate=%d slave_id=%d dry_run=%s session_timeout=%d",
+                args.path, args.baudrate, args.slave_id, args.dry_run, args.session_timeout)
 
     try:
         input_path, csv_files, is_batch = resolve_input_files(args.path, args.recursive)
         parsed_files = [(csv_path, parse_csv(csv_path, args.encoding)) for csv_path in csv_files]
     except CsvParseError as exc:
+        logger.error("CSV parse error: %s", exc)
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    logger.info("Resolved %d CSV file(s), is_batch=%s", len(csv_files), is_batch)
+    for csv_path, steps in parsed_files:
+        logger.debug("Parsed %s: %d steps", csv_path, len(steps))
 
     use_relative = args.recursive and is_batch
 
@@ -1452,6 +1596,7 @@ def main() -> int:
     )
 
     if has_sim_steps and not args.sim_api and not args.dry_run:
+        logger.error("CSV contains sim_* operations but --sim-api is not set")
         print("ERROR: CSV contains sim_* operations but --sim-api is not set", file=sys.stderr)
         return 2
 
@@ -1466,6 +1611,7 @@ def main() -> int:
                     idx = dev.get("device_index", 0)
                     if idx and isinstance(idx, int) and idx > 0 and sn:
                         if idx in sim_ctx._index_to_sn:
+                            logger.error("duplicate device_index %d (sn=%s and sn=%s)", idx, sim_ctx._index_to_sn[idx], sn)
                             print(
                                 f"ERROR: duplicate device_index {idx} "
                                 f"(sn={sim_ctx._index_to_sn[idx]} and sn={sn})",
@@ -1473,7 +1619,9 @@ def main() -> int:
                             )
                             return 2
                         sim_ctx._index_to_sn[idx] = sn
+            logger.info("DeviceSimulator initialized: %d devices mapped", len(sim_ctx._index_to_sn))
         except SimApiError as exc:
+            logger.error("DeviceSimulator API unreachable: %s", exc)
             print(f"ERROR: DeviceSimulator API unreachable: {exc}", file=sys.stderr)
             return 2
 
@@ -1485,7 +1633,9 @@ def main() -> int:
             client = create_client(port, args.baudrate)
             if not client.connect():
                 raise ConnectionSetupError(f"failed to connect to serial port: {port}")
+            logger.info("Serial connected: port=%s baudrate=%d", port, args.baudrate)
         except ConnectionSetupError as exc:
+            logger.error("Serial connection failed: %s", exc)
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
 
@@ -1544,6 +1694,9 @@ def main() -> int:
         ensure_ascii=True,
         separators=(",", ":"),
     ))
+
+    overall = "PASS" if all(r.status == "pass" for r in results) else "FAIL"
+    logger.info("Session finished: %s (%d files)", overall, len(results))
 
     if all(result.status == "pass" for result in results):
         return 0
