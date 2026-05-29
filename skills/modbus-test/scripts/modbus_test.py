@@ -417,10 +417,17 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
                 continue
 
             if None in row:
-                raise CsvParseError(
-                    f"row {row_num}: extra columns detected — likely an unquoted value "
-                    f"containing commas"
-                )
+                extra = row[None]
+                if not isinstance(extra, list):
+                    extra = [extra]
+                extra_str = ",".join(str(v).strip() for v in extra if v is not None and str(v).strip())
+                if extra_str:
+                    current_desc = str(row.get(desc_col, "") or "").strip()
+                    row[desc_col] = current_desc + "," + extra_str
+                del row[None]
+                logging.getLogger(LOG_LOGGER_NAME).warning(
+                    "%s: row %d: merged %d extra field(s) into description",
+                    csv_path, row_num, len(extra))
 
             func = str(row.get(func_col, "")).strip().lower()
             if func not in VALID_FUNCS:
