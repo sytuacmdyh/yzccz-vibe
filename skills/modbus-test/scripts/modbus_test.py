@@ -37,6 +37,7 @@ FUNC_SIM_CONTROL = "sim_control"
 FUNC_SIM_POWER = "sim_power"
 FUNC_SIM_READ = "sim_read"
 FUNC_SIM_WAIT = "sim_wait"
+FUNC_SET_SLAVE = "set_slave"
 SIM_FUNCS = {FUNC_SIM_CONTROL, FUNC_SIM_POWER, FUNC_SIM_READ, FUNC_SIM_WAIT}
 VALID_FUNCS = {
     FUNC_WRITE,
@@ -50,6 +51,7 @@ VALID_FUNCS = {
     FUNC_SIM_POWER,
     FUNC_SIM_READ,
     FUNC_SIM_WAIT,
+    FUNC_SET_SLAVE,
 }
 
 SIM_PROP_MAP: dict[str, str] = {
@@ -130,6 +132,7 @@ class FileResult:
 class ExecutionContext:
     client: Any
     slave_id: int
+    initial_slave_id: int
     wait_timeout: int
     wait_interval: float
     session_deadline: float | None
@@ -472,6 +475,12 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
                 _validate_sim_read_value(value_text, row_num)
             elif func == FUNC_SIM_WAIT:
                 _validate_sim_wait_value(value_text, row_num)
+            elif func == FUNC_SET_SLAVE:
+                sid = parse_int(value_text, "slave id", row_num)
+                if sid < 1 or sid > 247:
+                    raise CsvParseError(
+                        f"row {row_num}: slave id must be 1-247, got {sid}"
+                    )
 
             steps.append(
                 Step(
@@ -966,6 +975,8 @@ def requires_serial(step: Step) -> bool:
         return False
     if step.func == FUNC_DELAY:
         return step.addr != 0
+    if step.func == FUNC_SET_SLAVE:
+        return False
     return True
 
 
@@ -1017,6 +1028,22 @@ def build_wait_timeout_detail(
 def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
     ensure_session_time(ctx)
     index = step.row_num
+
+    if step.func == FUNC_SET_SLAVE:
+        new_id = parse_int(step.value, "slave id", step.row_num)
+        if new_id < 1 or new_id > 247:
+            return StepResult(
+                index, step.func, "FAIL",
+                f"set_slave {step.value}",
+                f"slave id must be 1-247, got {new_id}",
+            )
+        old_id = ctx.slave_id
+        ctx.slave_id = new_id
+        ctx.start_time_value = None
+        return StepResult(
+            index, step.func, "PASS",
+            f"set_slave {old_id} -> {new_id}",
+        )
 
     if step.func == FUNC_WRITE:
         value = parse_int(step.value, "write value", step.row_num)
@@ -1392,6 +1419,8 @@ def run_file(
 ) -> FileResult:
     name = display_name or csv_path.name
     logger = logging.getLogger(LOG_LOGGER_NAME)
+    ctx.slave_id = ctx.initial_slave_id
+    ctx.start_time_value = None
     logger.info("Running file: %s (%d steps)", name, len(steps))
     if verbose:
         print(f"=== TEST: {name} ===")
@@ -1650,6 +1679,7 @@ def main() -> int:
     ctx = ExecutionContext(
         client=client,
         slave_id=args.slave_id,
+        initial_slave_id=args.slave_id,
         wait_timeout=args.wait_timeout,
         wait_interval=args.wait_interval,
         session_deadline=session_deadline,

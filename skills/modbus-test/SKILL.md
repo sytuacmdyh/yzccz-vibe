@@ -83,6 +83,7 @@ read,4250,350,Verify target temp
 |-----------|----------|
 | `write` | Write single holding register; on failure wait 1s and retry up to 3 times |
 | `write_multi` | Write multiple consecutive holding registers (FC16); address=starting register, value=comma-separated integers (must be quoted in CSV); max 123 registers per step, each value 0–65535; on failure wait 1s and retry up to 3 times |
+| `set_slave` | Switch current Modbus slave ID for remaining steps in this file; value=new slave ID (1-247); address unused. Resets to `--slave-id` at next file in batch mode. Clears `read_start_time` baseline. |
 | `read` | Read holding register and compare (exact/range/bit) |
 | `delay` | Sleep (address=0: use value as seconds; address!=0: add register value); **host wall-clock time** |
 | `wait` | Poll register until match or timeout; supports per-step `timeout=` (host time) or `logic_timeout=` (device time) |
