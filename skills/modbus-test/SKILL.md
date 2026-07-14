@@ -39,17 +39,22 @@ The user may provide:
 
 1. **Determine path**: Resolve the CSV file or folder path from user input. If relative, resolve from current working directory.
 2. **Detect port**: If `--port` not specified, auto-detect serial port. If multiple ports found, list them and ask user to specify. **Note**: Serial connection is skipped when CSV only contains `sim_*` and `delay(0)` operations.
-3. **Build command**:
+3. **Locate bundled script**: Resolve `SKILL_ROOT` before building the command. Check these directories in order and use the first one that contains `scripts/modbus_test.py`:
+   - `$PWD/.agents/skills/yzc-modbus-test` for a project-level `npx skills` install
+   - `$HOME/.agents/skills/yzc-modbus-test` for a global `npx skills` install
+   - `$PWD/skills/modbus-test` when running directly from this repository
+   If none exists, stop and report that the skill installation is incomplete.
+4. **Build command**:
    ```bash
    uv run --with "pymodbus>=3.0,<4.0" --with "pyserial>=3.5,<4.0" \
-     ~/.claude/skills/modbus-test/scripts/modbus_test.py <path> --port <port> [--baudrate 115200] [--slave-id 1] [--time-addr 4399] [--recursive]
+     "$SKILL_ROOT/scripts/modbus_test.py" <path> --port <port> [--baudrate 115200] [--slave-id 1] [--time-addr 4399] [--recursive]
    ```
    Add `--dry-run`, `--continue-on-fail`, `--stats`, or `--time-addr` if user requested.
    Add `--sim-api http://127.0.0.1:9090` when CSV contains `sim_*` operations.
    Add `--log-dir <path>` to customize log output directory. Add `--no-log` to disable file logging.
-4. **Show command**: Display the full command before execution.
-5. **Execute**: Run the command. Default timeout: 120s for the entire session. When specifying `--session-timeout`, reserve enough margin based on test case count and content (e.g., `delay`/`wait` durations, write retry overhead).
-6. **Summarize**: Parse output and present a summary table to the user.
+5. **Show command**: Display the full command before execution.
+6. **Execute**: Run the command. Default timeout: 120s for the entire session. When specifying `--session-timeout`, reserve enough margin based on test case count and content (e.g., `delay`/`wait` durations, write retry overhead).
+7. **Summarize**: Parse output and present a summary table to the user.
 
 ## Output Format
 
