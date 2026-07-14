@@ -115,6 +115,10 @@ Set device properties. Value format: `property:value`
 | `mode` | int | — | Mode |
 | `fan_level` | int | — | Fan level |
 | `target_temp` | int | 16–32 | **Celsius degrees**, not register value (e.g. use 24 for 24°C, not 240) |
+| `fan_supply_demand` | int | 0–3 | Simulator-only write override for read-only thermostat property `3/7` |
+| `floor_supply_demand` | int | 0–3 | Simulator-only write override for read-only thermostat property `3/8` |
+
+Supply-demand values are `0=none`, `1=increase`, `2=decrease`, and `3=hold`. These properties remain read-only in the real thermostat protocol; DeviceSimulator accepts writes only to inject deterministic integration-test states.
 
 **`sim_power` vs `sim_control power`**:
 
@@ -123,7 +127,7 @@ Both control device "power" but target different layers:
 | | `sim_power` | `sim_control power` |
 |---|---|---|
 | **What it does** | Control LAN UDP + MQTT connection (connect/disconnect) | Write hardware power register (`2_1`) |
-| **API endpoint** | `POST /api/devices/{sn}/power` | `POST /api/devices/{sn}/property` |
+| **API endpoint** | `POST /api/devices/{sn}/power` | `POST /api/devices/{sn}/control` |
 | **Analogy** | Plug in / unplug the device | Press the power button on the device |
 | **Affects `connected`** | Yes (UDP/MQTT online status) | No |
 | **Affects hardware `power`** | No | Yes |
@@ -152,6 +156,8 @@ Power on/off device (LAN UDP + MQTT connection). Value: `on`/`off`/`true`/`false
 | `fault_status` | `2_11` | int | Fault status |
 | `cur_fan_speed` | `3_4` | int | Current fan speed |
 | `comp_status` | `3_5` | int | Compressor status |
+| `fan_supply_demand` | `3_7` | int | Fan-coil supply-temperature demand |
+| `floor_supply_demand` | `3_8` | int | Floor-heating supply-temperature demand |
 
 Value format for `sim_read`: `property:expected`
 - For bool properties (`power`): `true`/`false`/`on`/`off`/`1`/`0`

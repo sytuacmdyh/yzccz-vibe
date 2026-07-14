@@ -64,9 +64,18 @@ SIM_PROP_MAP: dict[str, str] = {
     "fault_status": "2_11",
     "cur_fan_speed": "3_4",
     "comp_status": "3_5",
+    "fan_supply_demand": "3_7",
+    "floor_supply_demand": "3_8",
 }
 SIM_BOOL_PROPS = {"power"}
-SIM_CONTROL_WHITELIST = {"power", "mode", "fan_level", "target_temp"}
+SIM_SUPPLY_DEMAND_PROPS = {"fan_supply_demand", "floor_supply_demand"}
+SIM_CONTROL_WHITELIST = {
+    "power",
+    "mode",
+    "fan_level",
+    "target_temp",
+    *SIM_SUPPLY_DEMAND_PROPS,
+}
 SIM_POWER_ON_VALUES = {"on", "true", "1"}
 SIM_POWER_OFF_VALUES = {"off", "false", "0"}
 
@@ -754,6 +763,17 @@ def _validate_sim_control_value(raw: str, row_num: int) -> None:
         if not 16 <= v <= 32:
             raise CsvParseError(
                 f"row {row_num}: sim_control target_temp must be 16..32, got {v}"
+            )
+    elif prop in SIM_SUPPLY_DEMAND_PROPS:
+        try:
+            v = int(val)
+        except ValueError:
+            raise CsvParseError(
+                f"row {row_num}: sim_control {prop} must be an integer"
+            )
+        if not 0 <= v <= 3:
+            raise CsvParseError(
+                f"row {row_num}: sim_control {prop} must be 0..3, got {v}"
             )
     else:
         try:
