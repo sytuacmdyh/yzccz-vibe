@@ -96,6 +96,10 @@ class SimApiError(Exception):
     """Raised on DeviceSimulator API call failure."""
 
 
+class SimUnavailableError(SimApiError):
+    """Raised when DeviceSimulator cannot be reached."""
+
+
 @dataclass(frozen=True)
 class Step:
     func: str
@@ -116,16 +120,6 @@ class StepResult:
 
 
 @dataclass
-class FuncStats:
-    func: str
-    count: int
-    total_s: float
-    min_s: float
-    max_s: float
-    avg_s: float
-
-
-@dataclass
 class FileResult:
     name: str
     path: str
@@ -134,6 +128,19 @@ class FileResult:
     total: int
     duration_s: float
     step_results: list[StepResult]
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class InputFile:
+    path: Path
+    display_name: str
+
+
+@dataclass
+class PreparedFile:
+    input_file: InputFile
+    steps: list[Step] | None = None
     error: str = ""
 
 
@@ -175,34 +182,38 @@ def setup_logging(log_dir: str, no_log: bool) -> Path | None:
     for h in logger.handlers[:]:
         h.close()
     logger.handlers.clear()
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
     if no_log:
+        logger.addHandler(logging.NullHandler())
         return None
     log_path = Path(log_dir)
     try:
         log_path.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        print(f"WARNING: cannot create log dir {log_dir}: {exc}", file=sys.stderr)
+    except OSError:
+        logger.addHandler(logging.NullHandler())
         return None
     filename = f"modbus_test_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     file_path = log_path / filename
     try:
         handler = logging.FileHandler(file_path, encoding="utf-8")
-    except OSError as exc:
-        print(f"WARNING: cannot create log file {file_path}: {exc}", file=sys.stderr)
+    except OSError:
+        logger.addHandler(logging.NullHandler())
         return None
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
-    print(f"Log: {file_path}", file=sys.stderr)
     return file_path
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Modbus serial tests from a CSV file or a folder of CSV files."
+        description="Run Modbus serial tests from a CSV directory or an ordered list of CSV files."
     )
-    parser.add_argument("path", help="CSV file or folder path")
+    parser.add_argument(
+        "paths",
+        nargs="+",
+        help="one CSV directory or one or more CSV file paths",
+    )
     parser.add_argument("--port", default="auto", help="Serial port path or auto")
     parser.add_argument("--baudrate", type=int, default=115200, help="Serial baudrate")
     parser.add_argument("--slave-id", type=int, default=1, help="Modbus device_id")
@@ -246,16 +257,6 @@ def parse_args() -> argparse.Namespace:
         help="Recursively search subdirectories for CSV files",
     )
     parser.add_argument(
-        "--continue-on-fail",
-        action="store_true",
-        help="On file failure, continue with the next CSV instead of stopping the batch",
-    )
-    parser.add_argument(
-        "--stats",
-        action="store_true",
-        help="Print per-function-type timing statistics (default: disabled)",
-    )
-    parser.add_argument(
         "--sim-api",
         default="http://127.0.0.1:9090",
         help="DeviceSimulator API base URL (default: http://127.0.0.1:9090)",
@@ -276,7 +277,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable file logging",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.wait_timeout < 1:
         parser.error("--wait-timeout must be >= 1")
     if args.wait_interval <= 0:
@@ -294,23 +295,47 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def resolve_input_files(raw_path: str, recursive: bool = False) -> tuple[Path, list[Path], bool]:
-    input_path = Path(raw_path).expanduser()
-    if not input_path.exists():
-        raise CsvParseError(f"path does not exist: {input_path}")
-    if input_path.is_file():
-        return input_path, [input_path], False
-    if not input_path.is_dir():
-        raise CsvParseError(f"path is not a file or directory: {input_path}")
+def resolve_input_files(raw_paths: list[str], recursive: bool = False) -> list[InputFile]:
+    paths = [Path(raw_path).expanduser() for raw_path in raw_paths]
+    directories = [path for path in paths if path.is_dir()]
 
-    pattern = "**/*.csv" if recursive else "*.csv"
-    files = sorted(
-        [path for path in input_path.glob(pattern) if path.is_file()],
-        key=lambda p: extract_number(p.relative_to(input_path)),
-    )
-    if not files:
-        raise CsvParseError(f"no CSV files found in directory: {input_path}")
-    return input_path, files, True
+    if directories:
+        if len(paths) != 1:
+            raise CsvParseError("directory mode accepts exactly one directory")
+        input_path = directories[0]
+        pattern = "**/*.csv" if recursive else "*.csv"
+        files = sorted(
+            [path for path in input_path.glob(pattern) if path.is_file()],
+            key=lambda path: extract_number(path.relative_to(input_path)),
+        )
+        if not files:
+            raise CsvParseError(f"no CSV files found in directory: {input_path}")
+        return [
+            InputFile(path=path, display_name=str(path.relative_to(input_path)))
+            for path in files
+        ]
+
+    if recursive:
+        raise CsvParseError("--recursive can only be used with directory mode")
+
+    return [
+        InputFile(path=path, display_name=raw_path)
+        for raw_path, path in zip(raw_paths, paths)
+    ]
+
+
+def prepare_input_file(input_file: InputFile, encoding: str) -> PreparedFile:
+    path = input_file.path
+    try:
+        if not path.exists():
+            raise CsvParseError(f"path does not exist: {path}")
+        if not path.is_file():
+            raise CsvParseError(f"path is not a file: {path}")
+        if path.suffix.lower() != ".csv":
+            raise CsvParseError(f"path is not a CSV file: {path}")
+        return PreparedFile(input_file=input_file, steps=parse_csv(path, encoding))
+    except (CsvParseError, OSError, UnicodeError, csv.Error) as exc:
+        return PreparedFile(input_file=input_file, error=str(exc))
 
 
 def extract_number(path: Path) -> list[Any]:
@@ -872,9 +897,13 @@ def _sim_http_json(sim: SimContext, method: str, path: str, body: dict | None = 
     try:
         with urllib.request.urlopen(req, timeout=sim.http_timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
+    except urllib.error.HTTPError as exc:
         raise SimApiError(f"HTTP request failed: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except (urllib.error.URLError, ConnectionError) as exc:
+        raise SimUnavailableError(f"HTTP request failed: {exc}") from exc
+    except TimeoutError as exc:
+        raise SimUnavailableError(f"HTTP request timed out: {exc}") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SimApiError(f"invalid JSON response: {exc}") from exc
     if not isinstance(payload, dict):
         raise SimApiError(f"unexpected response shape: {type(payload).__name__}")
@@ -883,14 +912,14 @@ def _sim_http_json(sim: SimContext, method: str, path: str, body: dict | None = 
     return payload.get("data")
 
 
-def sim_resolve_sn(sim: SimContext, device_index: int) -> str:
-    if device_index in sim._index_to_sn:
-        return sim._index_to_sn[device_index]
-    devices = _sim_http_json(sim, "GET", "/api/devices")
+def update_sim_device_map(sim: SimContext, devices: Any) -> None:
     if not isinstance(devices, list):
         raise SimApiError("unexpected /api/devices response shape")
+
     new_map: dict[int, str] = {}
     for dev in devices:
+        if not isinstance(dev, dict):
+            raise SimApiError("unexpected device entry in /api/devices response")
         sn = dev.get("sn", "")
         idx = dev.get("device_index", 0)
         if idx and isinstance(idx, int) and idx > 0 and sn:
@@ -900,6 +929,13 @@ def sim_resolve_sn(sim: SimContext, device_index: int) -> str:
                 )
             new_map[idx] = sn
     sim._index_to_sn.update(new_map)
+
+
+def sim_resolve_sn(sim: SimContext, device_index: int) -> str:
+    if device_index in sim._index_to_sn:
+        return sim._index_to_sn[device_index]
+    devices = _sim_http_json(sim, "GET", "/api/devices")
+    update_sim_device_map(sim, devices)
     if device_index in sim._index_to_sn:
         return sim._index_to_sn[device_index]
     available = sorted(sim._index_to_sn.keys())
@@ -1422,19 +1458,11 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
     return StepResult(index, step.func, "FAIL", step.func, "unsupported function")
 
 
-def print_step(step_number: int, result: StepResult) -> None:
-    summary = result.summary
-    if result.detail:
-        summary = f"{summary}  {result.detail}"
-    print(f"Step {step_number:2d}  {summary:<42} {result.status}")
-
-
 def run_file(
     csv_path: Path,
     steps: list[Step],
     ctx: ExecutionContext,
     *,
-    verbose: bool,
     display_name: str | None = None,
 ) -> FileResult:
     name = display_name or csv_path.name
@@ -1442,13 +1470,10 @@ def run_file(
     ctx.slave_id = ctx.initial_slave_id
     ctx.start_time_value = None
     logger.info("Running file: %s (%d steps)", name, len(steps))
-    if verbose:
-        print(f"=== TEST: {name} ===")
     started = time.monotonic()
     step_results: list[StepResult] = []
     passed = 0
     status = "pass"
-    error = ""
 
     for step_number, step in enumerate(steps, start=1):
         step_started = time.monotonic()
@@ -1463,8 +1488,6 @@ def run_file(
                     step_number, len(steps),
                     result.summary, result.detail, result.status,
                     result.duration_s)
-        if verbose:
-            print_step(step_number, result)
         if result.status == "PASS":
             passed += 1
             continue
@@ -1474,15 +1497,9 @@ def run_file(
 
     total = len(steps)
     duration_s = time.monotonic() - started
-    if error:
-        status = "error"
 
     logger.info("File result: %s %s (%d/%d passed) %.3fs",
                 name, status.upper(), passed, total, duration_s)
-    if verbose:
-        verdict = status.upper()
-        print(f"=== RESULT: {verdict} ({passed}/{total} passed) ===")
-        print()
     return FileResult(
         name=name,
         path=str(csv_path),
@@ -1491,195 +1508,136 @@ def run_file(
         total=total,
         duration_s=duration_s,
         step_results=step_results,
-        error=error,
     )
 
 
-def print_batch_header(base_path: Path) -> None:
-    print(f"=== BATCH: {base_path} ===")
-
-
-def print_batch_progress(index: int, total: int, result: FileResult) -> None:
-    print(
-        f"[{index}/{total}] {result.name} ... {result.status.upper()} "
-        f"({result.passed}/{result.total})"
+def make_file_result(prepared: PreparedFile, status: str, reason: str) -> FileResult:
+    steps = prepared.steps or []
+    return FileResult(
+        name=prepared.input_file.display_name,
+        path=str(prepared.input_file.path),
+        status=status,
+        passed=0,
+        total=len(steps),
+        duration_s=0.0,
+        step_results=[],
+        error=reason,
     )
 
 
-def print_summary(results: list[FileResult]) -> None:
+def has_sim_steps(steps: list[Step]) -> bool:
+    return any(step.func in SIM_FUNCS for step in steps)
+
+
+def print_results_header(log_path: Path | None, no_log: bool) -> None:
+    print("=== RESULTS ===")
+    if log_path is not None:
+        print(f"Log: {log_path}")
+    elif no_log:
+        print("Log: disabled")
+    else:
+        print("Log: unavailable")
+
+
+def print_file_result(index: int, total: int, result: FileResult) -> None:
+    suffix = ""
+    if result.status == "skip":
+        suffix = f" ({result.error})"
+    elif not result.error or result.step_results:
+        suffix = f" ({result.passed}/{result.total})"
+    print(f"[{index}/{total}] {result.name} ... {result.status.upper()}{suffix}")
+
+
+def print_errors(results: list[FileResult]) -> None:
     print()
-    print("=== SUMMARY ===")
-    max_name = max(len(r.name) for r in results) if results else 4
-    col = max(max_name, 4)
-    print(f"| {'File':<{col}} | Result | Passed/Total |")
-    print(f"|{'-' * (col + 2)}|--------|--------------|")
-    for result in results:
-        ratio = f"{result.passed}/{result.total}"
-        print(
-            f"| {result.name:<{col}} | {result.status.upper():<6} | "
-            f"{ratio:<12} |"
-        )
-    passed_files = sum(1 for result in results if result.status == "pass")
-    failed_files = len(results) - passed_files
-    print(
-        f"=== {len(results)} files: {passed_files} passed, {failed_files} failed ==="
-    )
-
-
-def collect_time_stats(results: list[FileResult]) -> list[FuncStats]:
-    buckets: dict[str, list[float]] = {}
-    order: list[str] = []
-    for result in results:
-        for step in result.step_results:
-            if step.func not in buckets:
-                buckets[step.func] = []
-                order.append(step.func)
-            buckets[step.func].append(step.duration_s)
-
-    stats: list[FuncStats] = []
-    for func in order:
-        durations = buckets[func]
-        total = sum(durations)
-        stats.append(FuncStats(
-            func=func,
-            count=len(durations),
-            total_s=total,
-            min_s=min(durations),
-            max_s=max(durations),
-            avg_s=total / len(durations),
-        ))
-    return stats
-
-
-def print_time_stats(stats: list[FuncStats], results: list[FileResult]) -> None:
-    print()
-    print("=== TIME STATISTICS ===")
-    print(f"| {'Function':<12} | {'Count':>5} | {'Total':>8} | {'Avg':>8} | {'Min':>8} | {'Max':>8} |")
-    print(f"|{'-' * 14}|{'-' * 7}|{'-' * 10}|{'-' * 10}|{'-' * 10}|{'-' * 10}|")
-    for s in stats:
-        print(
-            f"| {s.func:<12} | {s.count:>5} | {format_seconds(s.total_s):>7}s "
-            f"| {format_seconds(s.avg_s):>7}s | {format_seconds(s.min_s):>7}s "
-            f"| {format_seconds(s.max_s):>7}s |"
-        )
-    total_count = sum(s.count for s in stats)
-    total_dur = sum(s.total_s for s in stats)
-    print(f"| {'TOTAL':<12} | {total_count:>5} | {format_seconds(total_dur):>7}s |")
-
-
-def build_json_summary(
-    results: list[FileResult],
-    *,
-    include_stats: bool = False,
-) -> dict[str, Any]:
-    overall_status = "pass" if all(result.status == "pass" for result in results) else "fail"
-    passed_files = sum(1 for result in results if result.status == "pass")
-    files_json = [
-        {
-            "name": result.name,
-            "status": result.status,
-            "passed": result.passed,
-            "total": result.total,
-            "duration_s": round(result.duration_s, 3),
-        }
-        for result in results
-    ]
-    summary: dict[str, Any] = {
-        "status": overall_status,
-        "total_files": len(results),
-        "passed_files": passed_files,
-        "files": files_json,
-    }
-    if include_stats:
-        for i, result in enumerate(results):
-            files_json[i]["steps"] = [
-                {
-                    "row": step.index,
-                    "function": step.func,
-                    "status": step.status.lower(),
-                    "duration_s": round(step.duration_s, 3),
-                    "summary": step.summary,
-                    "detail": step.detail,
-                }
-                for step in result.step_results
-            ]
-        stats = collect_time_stats(results)
-        summary["stats"] = [
-            {
-                "func": s.func,
-                "count": s.count,
-                "total_s": round(s.total_s, 3),
-                "min_s": round(s.min_s, 3),
-                "max_s": round(s.max_s, 3),
-                "avg_s": round(s.avg_s, 3),
-            }
-            for s in stats
-        ]
-    return summary
+    print("=== ERRORS ===")
+    failed = [result.name for result in results if result.status == "fail"]
+    if failed:
+        for name in failed:
+            print(name)
+    else:
+        print("None")
 
 
 def main() -> int:
     args = parse_args()
-    setup_logging(args.log_dir, args.no_log)
+    log_path = setup_logging(args.log_dir, args.no_log)
     logger = logging.getLogger(LOG_LOGGER_NAME)
 
-    logger.info("modbus_test started: path=%s baudrate=%d slave_id=%d dry_run=%s session_timeout=%d",
-                args.path, args.baudrate, args.slave_id, args.dry_run, args.session_timeout)
+    logger.info(
+        "modbus_test started: paths=%s baudrate=%d slave_id=%d dry_run=%s session_timeout=%d",
+        args.paths,
+        args.baudrate,
+        args.slave_id,
+        args.dry_run,
+        args.session_timeout,
+    )
 
     try:
-        input_path, csv_files, is_batch = resolve_input_files(args.path, args.recursive)
-        parsed_files = [(csv_path, parse_csv(csv_path, args.encoding)) for csv_path in csv_files]
+        input_files = resolve_input_files(args.paths, args.recursive)
     except CsvParseError as exc:
-        logger.error("CSV parse error: %s", exc)
+        logger.error("Input error: %s", exc)
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    logger.info("Resolved %d CSV file(s), is_batch=%s", len(csv_files), is_batch)
-    for csv_path, steps in parsed_files:
-        logger.debug("Parsed %s: %d steps", csv_path, len(steps))
+    prepared_files = [
+        prepare_input_file(input_file, args.encoding) for input_file in input_files
+    ]
+    logger.info("Resolved %d CSV file(s)", len(prepared_files))
+    for prepared in prepared_files:
+        if prepared.error:
+            logger.error(
+                "Input file failed: %s: %s",
+                prepared.input_file.display_name,
+                prepared.error,
+            )
+        else:
+            logger.debug(
+                "Parsed %s: %d steps",
+                prepared.input_file.path,
+                len(prepared.steps or []),
+            )
 
-    use_relative = args.recursive and is_batch
-
-    has_sim_steps = any(
-        step.func in SIM_FUNCS
-        for _, steps in parsed_files
-        for step in steps
+    valid_files = [prepared for prepared in prepared_files if prepared.steps is not None]
+    session_has_sim_steps = any(
+        has_sim_steps(prepared.steps or []) for prepared in valid_files
     )
-    needs_serial = any(
-        requires_serial(step)
-        for _, steps in parsed_files
-        for step in steps
-    )
 
-    if has_sim_steps and not args.sim_api and not args.dry_run:
+    if session_has_sim_steps and not args.sim_api and not args.dry_run:
         logger.error("CSV contains sim_* operations but --sim-api is not set")
         print("ERROR: CSV contains sim_* operations but --sim-api is not set", file=sys.stderr)
         return 2
 
     sim_ctx: SimContext | None = None
-    if args.sim_api and has_sim_steps and not args.dry_run:
+    sim_unavailable = False
+    if args.sim_api and session_has_sim_steps and not args.dry_run:
         sim_ctx = SimContext(api_base=args.sim_api, http_timeout=args.sim_http_timeout)
         try:
             devices = _sim_http_json(sim_ctx, "GET", "/api/devices")
-            if isinstance(devices, list):
-                for dev in devices:
-                    sn = dev.get("sn", "")
-                    idx = dev.get("device_index", 0)
-                    if idx and isinstance(idx, int) and idx > 0 and sn:
-                        if idx in sim_ctx._index_to_sn:
-                            logger.error("duplicate device_index %d (sn=%s and sn=%s)", idx, sim_ctx._index_to_sn[idx], sn)
-                            print(
-                                f"ERROR: duplicate device_index {idx} "
-                                f"(sn={sim_ctx._index_to_sn[idx]} and sn={sn})",
-                                file=sys.stderr,
-                            )
-                            return 2
-                        sim_ctx._index_to_sn[idx] = sn
-            logger.info("DeviceSimulator initialized: %d devices mapped", len(sim_ctx._index_to_sn))
+            update_sim_device_map(sim_ctx, devices)
+            logger.info(
+                "DeviceSimulator initialized: %d devices mapped",
+                len(sim_ctx._index_to_sn),
+            )
+        except SimUnavailableError as exc:
+            sim_unavailable = True
+            sim_ctx = None
+            logger.warning("DeviceSimulator unavailable: %s", exc)
         except SimApiError as exc:
-            logger.error("DeviceSimulator API unreachable: %s", exc)
-            print(f"ERROR: DeviceSimulator API unreachable: {exc}", file=sys.stderr)
+            logger.error("DeviceSimulator API error: %s", exc)
+            print(f"ERROR: DeviceSimulator API error: {exc}", file=sys.stderr)
             return 2
+
+    runnable_files = [
+        prepared
+        for prepared in valid_files
+        if not (sim_unavailable and has_sim_steps(prepared.steps or []))
+    ]
+    needs_serial = any(
+        requires_serial(step)
+        for prepared in runnable_files
+        for step in prepared.steps or []
+    )
 
     client = None
     port = args.port
@@ -1709,55 +1667,39 @@ def main() -> int:
     )
 
     results: list[FileResult] = []
+    print_results_header(log_path, args.no_log)
     try:
-        if is_batch:
-            print_batch_header(input_path)
-            for index, (csv_path, steps) in enumerate(parsed_files, start=1):
-                display = str(csv_path.relative_to(input_path)) if use_relative else csv_path.name
+        for index, prepared in enumerate(prepared_files, start=1):
+            steps = prepared.steps
+            if prepared.error:
+                result = make_file_result(prepared, "fail", prepared.error)
+            elif sim_unavailable and has_sim_steps(steps or []):
+                result = make_file_result(
+                    prepared,
+                    "skip",
+                    "DeviceSimulator unavailable",
+                )
+            elif time.monotonic() >= session_deadline:
+                result = make_file_result(prepared, "skip", "session timeout")
+            else:
                 result = run_file(
-                    csv_path,
-                    steps,
+                    prepared.input_file.path,
+                    steps or [],
                     ctx,
-                    verbose=False,
-                    display_name=display,
+                    display_name=prepared.input_file.display_name,
                 )
-                results.append(result)
-                print_batch_progress(index, len(parsed_files), result)
-                if result.status != "pass" and not args.continue_on_fail:
-                    break
-        else:
-            csv_path, steps = parsed_files[0]
-            results.append(
-                run_file(
-                    csv_path,
-                    steps,
-                    ctx,
-                    verbose=True,
-                )
-            )
+            results.append(result)
+            print_file_result(index, len(prepared_files), result)
     finally:
         if client is not None:
             client.close()
 
-    if is_batch:
-        print_summary(results)
+    print_errors(results)
 
-    if args.stats:
-        stats = collect_time_stats(results)
-        print_time_stats(stats, results)
-
-    print(json.dumps(
-        build_json_summary(results, include_stats=args.stats),
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ))
-
-    overall = "PASS" if all(r.status == "pass" for r in results) else "FAIL"
+    overall = "FAIL" if any(result.status == "fail" for result in results) else "PASS"
     logger.info("Session finished: %s (%d files)", overall, len(results))
 
-    if all(result.status == "pass" for result in results):
-        return 0
-    return 1
+    return 1 if any(result.status == "fail" for result in results) else 0
 
 
 if __name__ == "__main__":

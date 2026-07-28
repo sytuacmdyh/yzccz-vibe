@@ -1,6 +1,6 @@
 ---
 name: yzc-modbus-test
-description: Run CSV-driven Modbus serial tests and DeviceSimulator control. Supports single file or folder batch mode. Triggers when user mentions modbus test, serial test, integration test, CSV test, simulator test, sim test, or wants to verify register behavior via serial port or simulator.
+description: Run CSV-driven Modbus serial tests and DeviceSimulator control. Supports directory mode or an ordered list of files. Triggers when user mentions modbus test, serial test, integration test, CSV test, simulator test, sim test, or wants to verify register behavior via serial port or simulator.
 metadata:
   short-description: Modbus CSV serial test runner with DeviceSimulator support
 ---
@@ -20,16 +20,14 @@ Run CSV-driven Modbus serial tests against a target device via USB/serial port, 
 ## Parameters
 
 The user may provide:
-- **path** (required): CSV file or folder path (relative to current project or absolute)
+- **paths** (required): Either one CSV directory or one or more CSV file paths. Directory and file-list modes cannot be mixed.
 - **--port**: Serial port (default: auto-detect)
 - **--baudrate**: Baud rate (default: 115200)
 - **--slave-id**: Modbus slave ID (default: 1)
 - **--time-addr**: Device logic time register address (default: 4399)
 - **--session-timeout**: Maximum run time in seconds for the whole session (default: 120)
-- **--recursive**: Recursively search subdirectories for CSV files
+- **--recursive**: Recursively search subdirectories in directory mode; invalid with a file list
 - **--dry-run**: Parse only, no Modbus I/O, no HTTP calls
-- **--continue-on-fail**: On file failure, continue with the next CSV instead of stopping the batch
-- **--stats**: Print per-function-type timing statistics (count/total/avg/min/max)
 - **--sim-api**: DeviceSimulator API base URL (default: `http://127.0.0.1:9090`)
 - **--sim-http-timeout**: HTTP request timeout for DeviceSimulator API (default: 5.0s)
 - **--log-dir**: Directory for log files (default: `./logs`)
@@ -37,7 +35,7 @@ The user may provide:
 
 ## Execution Steps
 
-1. **Determine path**: Resolve the CSV file or folder path from user input. If relative, resolve from current working directory.
+1. **Determine inputs**: Use either one directory or an explicit list of CSV files. Preserve the user's order for a file list. In directory mode, scan the top level by default and add `--recursive` only when requested.
 2. **Detect port**: If `--port` not specified, auto-detect serial port. If multiple ports found, list them and ask user to specify. **Note**: Serial connection is skipped when CSV only contains `sim_*` and `delay(0)` operations.
 3. **Locate bundled script**: Resolve `SKILL_ROOT` before building the command. Check these directories in order and use the first one that contains `scripts/modbus_test.py`:
    - `$PWD/.agents/skills/yzc-modbus-test` for a project-level `npx skills` install
@@ -47,24 +45,36 @@ The user may provide:
 4. **Build command**:
    ```bash
    uv run --with "pymodbus>=3.0,<4.0" --with "pyserial>=3.5,<4.0" \
-     "$SKILL_ROOT/scripts/modbus_test.py" <path> --port <port> [--baudrate 115200] [--slave-id 1] [--time-addr 4399] [--recursive]
+     "$SKILL_ROOT/scripts/modbus_test.py" <directory> --port <port> [--recursive]
    ```
-   Add `--dry-run`, `--continue-on-fail`, `--stats`, or `--time-addr` if user requested.
+   Or pass an explicit ordered file list:
+   ```bash
+   uv run --with "pymodbus>=3.0,<4.0" --with "pyserial>=3.5,<4.0" \
+     "$SKILL_ROOT/scripts/modbus_test.py" <file-1.csv> <file-2.csv> [<file-N.csv>] --port <port>
+   ```
+   Add `--dry-run`, `--time-addr`, or other supported connection/time options if requested.
    Add `--sim-api http://127.0.0.1:9090` when CSV contains `sim_*` operations.
    Add `--log-dir <path>` to customize log output directory. Add `--no-log` to disable file logging.
 5. **Show command**: Display the full command before execution.
 6. **Execute**: Run the command. Default timeout: 120s for the entire session. When specifying `--session-timeout`, reserve enough margin based on test case count and content (e.g., `delay`/`wait` durations, write retry overhead).
-7. **Summarize**: Parse output and present a summary table to the user.
+7. **Report**: Relay the per-file `RESULTS` and final `ERRORS` list. Use the log file for step details and failure reasons.
 
 ## Output Format
 
-The script outputs step-by-step results (PASS/FAIL) and a summary.
+The script prints exactly two sections for a normal test session:
 
-**Single file**: Shows each step result and final pass/fail count.
-**Folder batch**: Shows per-file results + summary table + JSON.
-**With `--stats`**: Adds a per-function-type timing table (write/read/delay/wait etc.) with count, total, avg, min, max columns.
+```text
+=== RESULTS ===
+Log: logs/modbus_test_YYYYMMDD_HHMMSS.log
+[1/3] tests/a.csv ... PASS (12/12)
+[2/3] tests/b.csv ... FAIL (4/20)
+[3/3] tests/c.csv ... SKIP (DeviceSimulator unavailable)
 
-**File logging**: By default, a detailed log file is written to `./logs/modbus_test_YYYYMMDD_HHMMSS.log` containing step-by-step execution details, timing, and errors. The log file path is printed to stderr at startup.
+=== ERRORS ===
+tests/b.csv
+```
+
+`RESULTS` contains one line per CSV. `ERRORS` contains only failed file names and prints `None` when there are no failures. Detailed steps, timing, and failure reasons are written to the log. `--no-log` displays `Log: disabled`; a log setup failure displays `Log: unavailable`.
 
 ## CSV Format
 
@@ -220,8 +230,12 @@ The register at `--time-addr` (default 4399) is a **uint16 seconds counter** tha
 - Serial connection is skipped when CSV only contains `sim_*` and `delay(0)` operations (no serial port needed)
 - Device state carries over between files in batch mode
 - Folder scan is non-recursive by default (top-level *.csv only); use `--recursive` to search subdirectories
+- File-list mode preserves argument order and may include the same file more than once
+- A failed or invalid CSV does not stop later files; execution within one CSV stops at its first failed step
 - CSV encoding: UTF-8 with BOM (utf-8-sig)
 - Chinese column headers supported (功能/目标地址/目标值/说明)
 - `--sim-api` defaults to `http://127.0.0.1:9090` (not required for `--dry-run`)
-- API errors and unreachable DeviceSimulator produce step FAIL results, not script aborts
+- If DeviceSimulator is unreachable at session startup, every CSV containing `sim_*` is skipped as a neutral result; unrelated files still run
+- HTTP/protocol errors during the startup probe remain setup errors; simulator failures after a successful probe fail the current CSV
+- A session timeout fails the current CSV and skips the remaining valid CSV files
 - Duplicate DeviceIndex values cause startup error
