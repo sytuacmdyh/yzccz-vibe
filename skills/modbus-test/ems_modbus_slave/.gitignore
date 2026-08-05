@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+dist/
+.venv/
+venv/
+nuitka-crash-report.xml

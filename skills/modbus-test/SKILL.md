@@ -30,13 +30,22 @@ The user may provide:
 - **--dry-run**: Parse only, no Modbus I/O, no HTTP calls
 - **--sim-api**: DeviceSimulator API base URL (default: `http://127.0.0.1:9090`)
 - **--sim-http-timeout**: HTTP request timeout for DeviceSimulator API (default: 5.0s)
+- **--slave-app**: Override path to the EMS Modbus Slave `app.py` (default: the `ems_modbus_slave/app.py` bundled with this skill, auto-detected; only needed to point elsewhere)
+- **--slave-port**: Serial port for the slave child process (default: auto-detect)
+- **--slave-profile**: Profile path or profile_id for the slave (default: `dm_hp3_rs48_v2`)
+- **--slave-preset**: Preset JSON path to apply to the slave (optional)
+- **--slave-baudrate**: Override the slave profile baudrate (optional)
+- **--slave-slave-id**: Default slave ID for the child process (default: 1)
+- **--slave-respond-1-40**: Make the child respond to Modbus slave ID 1..40 (group control bench)
+- **--slave-ready-timeout**: Seconds to wait for the slave ready event (default: 10.0)
+- **--slave-stop-timeout**: Seconds to wait for graceful slave shutdown before kill (default: 5.0)
 - **--log-dir**: Directory for log files (default: `./logs`)
 - **--no-log**: Disable file logging
 
 ## Execution Steps
 
 1. **Determine inputs**: Use either one directory or an explicit list of CSV files. Preserve the user's order for a file list. In directory mode, scan the top level by default and add `--recursive` only when requested.
-2. **Detect port**: If `--port` not specified, auto-detect serial port. If multiple ports found, list them and ask user to specify. **Note**: Serial connection is skipped when CSV only contains `sim_*` and `delay(0)` operations.
+2. **Detect port**: If `--port` not specified, auto-detect serial port. If multiple ports found, list them and ask user to specify. **Note**: Serial connection is skipped when CSV only contains `sim_*`, `slave_*` and `delay(0)` operations.
 3. **Locate bundled script**: Resolve `SKILL_ROOT` before building the command. Check these directories in order and use the first one that contains `scripts/modbus_test.py`:
    - `$PWD/.agents/skills/yzc-modbus-test` for a project-level `npx skills` install
    - `$HOME/.agents/skills/yzc-modbus-test` for a global `npx skills` install
@@ -54,6 +63,7 @@ The user may provide:
    ```
    Add `--dry-run`, `--time-addr`, or other supported connection/time options if requested.
    Add `--sim-api http://127.0.0.1:9090` when CSV contains `sim_*` operations.
+   No `--slave-app` needed: the EMS Modbus Slave ships with this skill at `$SKILL_ROOT/ems_modbus_slave/app.py` and is auto-detected. Only pass `--slave-app <path>` (plus `--slave-port`, `--slave-preset`, etc. as needed) when a CSV contains `slave_*` operations and a different slave copy is wanted.
    Add `--log-dir <path>` to customize log output directory. Add `--no-log` to disable file logging.
 5. **Show command**: Display the full command before execution.
 6. **Execute**: Run the command. Default timeout: 120s for the entire session. When specifying `--session-timeout`, reserve enough margin based on test case count and content (e.g., `delay`/`wait` durations, write retry overhead).
@@ -104,6 +114,11 @@ read,4250,350,Verify target temp
 | `wait` | Poll register until match or timeout; supports per-step `timeout=` (host time) or `logic_timeout=` (device time) |
 | `read_start_time` | Read register at `--time-addr` (default 4399) as elapsed time observation baseline |
 | `logic_delay` | Poll device logic time register until elapsed seconds; address=0 uses `--time-addr`; **device logic time** |
+| `slave_start` | Launch the EMS Modbus Slave child process (`app.py --cli --stdio-control`) with `--slave-*` settings; address=0; waits for the ready event |
+| `slave_stop` | Gracefully stop the slave child process (shutdown command, kill fallback); address=0 |
+| `slave_write` | Write slave register(s) via the stdio control channel; address=DeviceIndex(>0), value=`addr:value[;addr:value][;slave_id=N]` (register injection bypasses writable restrictions) |
+| `slave_read` | Read slave register and compare; address=DeviceIndex(>0), value=`addr:expected[;slave_id=N]` (exact/range/bit) |
+| `slave_wait` | Poll slave register until match or timeout; address=DeviceIndex(>0), value=`addr:expected[;timeout=N][;interval=M][;slave_id=N]` |
 | `sim_power` | Power on/off device via DeviceSimulator API (controls LAN UDP connection); address=DeviceIndex(>0) |
 | `sim_control` | Set device property via DeviceSimulator API; address=DeviceIndex(>0), value=`property:value` |
 | `sim_read` | Read device hardware snapshot and compare; address=DeviceIndex(>0), value=`property:expected` |
@@ -179,6 +194,29 @@ Value format for `sim_wait`: `property:expected[;timeout=N][;interval=M]`
 
 **Note**: `--wait-timeout` has dual meaning: poll attempts for Modbus `wait`, seconds for `sim_wait`.
 
+### EMS Modbus Slave Operations
+
+`slave_*` operations launch and drive the EMS Modbus Slave simulator as the heatpump side of the bench. The simulator ships with this skill at `ems_modbus_slave/` (a self-contained copy of `tests/EMS Modbus Slave` from the hp-ctrl-box-gd32 repo: `app.py` + `src/` + `profiles/` + `presets/`; `dist/`, `logs/` and build artifacts are excluded). The script spawns `app.py --cli --stdio-control` as a child process and talks to it over a stdio JSON-RPC channel (no network ports). Set the launch configuration with the `--slave-*` flags; `slave_start`/`slave_stop` manage the lifecycle.
+
+Typical topology: GD32 EMS board (Modbus master, RS485) `<->` slave child process (USB-RS485). The CSV drives the EMS board registers over `--port`, while `slave_*` inspects/injects the heatpump-side registers to verify the EMS control chain.
+
+```csv
+function,address,value,description
+slave_start,0,start,Launch heatpump slave (--slave-port COM5, group-ctrl preset)
+slave_write,1,"604:200",Inject buffer temp 20.0C
+delay,0,2,Wait for EMS poll cycle
+write,5011,350,EMS writes heating target 35.0C (proto3 11)
+slave_wait,1,"11:350;timeout=10",Verify heatpump received target temp
+slave_stop,0,stop,Tear down slave
+```
+
+Notes:
+- Slave registers use **proto3 addresses** (the slave profile spans 0..1005): e.g. the slave-side address of EMS register `5011` is `11`. See `docs/protocal/heatpump/hs_proto3.md` and the slave profile JSON for the mapping.
+- `slave_write` injects via the slave's `set_direct` (bypasses writable restrictions); use it to simulate sensor values, not to judge the protocol.
+- `slave_id=N` on read/write/wait targets the per-slave register slots maintained by the slave (group control bench).
+- `--slave-app` defaults to the bundled `ems_modbus_slave/app.py` (auto-detected next to the skill); a missing bundle or an invalid explicit path is a setup error (exit code 2). Runtime failures (spawn, timeout, process death) FAIL the current CSV.
+- The child process is force-killed at session end if `slave_stop` was not reached (logged as a warning).
+
 #### Mixed Mode Example
 
 ```csv
@@ -227,7 +265,7 @@ The register at `--time-addr` (default 4399) is a **uint16 seconds counter** tha
 
 - Read uses FC03, single write uses FC06, multi-register write uses FC16
 - Serial connection shared across entire run (no per-file reconnect)
-- Serial connection is skipped when CSV only contains `sim_*` and `delay(0)` operations (no serial port needed)
+- Serial connection is skipped when CSV only contains `sim_*`/`slave_*` and `delay(0)` operations (no serial port needed)
 - Device state carries over between files in batch mode
 - Folder scan is non-recursive by default (top-level *.csv only); use `--recursive` to search subdirectories
 - File-list mode preserves argument order and may include the same file more than once
