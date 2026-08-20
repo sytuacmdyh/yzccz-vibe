@@ -1,0 +1,67 @@
+﻿抽检 50 条
+  完全通过: 20
+  轻微差异(名称换行等): 0
+  需关注: 30
+[issue] word 1 (开关机)
+    - source.row=100 无法解析协议行
+[issue] word 11 (制热模式-目标温度)
+    - source.row=113 无法解析协议行
+[issue] word 14 (禁止制热运行的最高室外温度)
+    - source.row=116 无法解析协议行
+[issue] word 81 (制热-压缩机降频转速减少值1)
+    - source.row=183 无法解析协议行
+[issue] word 94 (制热-2\#增焓阀目标开度)
+    - source.row=196 无法解析协议行
+[issue] word 112 (制冷补气PID-D)
+    - source.row=216 无法解析协议行
+[issue] word 114 (制冷吸气PID-P)
+    - source.row=218 无法解析协议行
+[issue] word 171 (制冷-压缩机降频回差值2)
+    - source.row=274 无法解析协议行
+[issue] word 201 (除霜补气PID-P)
+    - source.row=296 无法解析协议行
+[issue] word 202 (除霜补气PID-I)
+    - source.row=297 无法解析协议行
+[issue] word 205 (除霜PID-P)
+    - source.row=300 无法解析协议行
+[issue] word 213 (除霜锁定期)
+    - source.row=308 无法解析协议行
+[issue] word 225 (除霜模式)
+    - source.row=320 无法解析协议行
+[issue] word 227 (除霜-主阀PID控制阈值)
+    - source.row=322 无法解析协议行
+[issue] word 306 (禁止制热水运行的最高室外温度)
+    - source.row=351 无法解析协议行
+[issue] word 423 (2\#增焓补气压力补偿值)
+    - source.row=415 无法解析协议行
+[issue] word 443 (水流不足告警判断次数)
+    - source.row=436 无法解析协议行
+[issue] word 479 (预留 479)
+    - source.row=467 无法解析协议行
+[issue] word 486 (预留 486)
+    - source.row=467 无法解析协议行
+[issue] word 500 (产品型号)
+    - source.row=480 无法解析协议行
+[issue] word 520 (一次水泵间歇运行-运行时间)
+    - source.row=499 无法解析协议行
+[issue] word 521 (热源侧水流量计)
+    - source.row=500 无法解析协议行
+[issue] word 536 (低噪-风机最大转速比例值)
+    - source.row=515 无法解析协议行
+[issue] word 555 (电表B相电流)
+    - source.row=534 无法解析协议行
+[issue] word 600 (热泵运行状态)
+    - source.row=581 无法解析协议行
+[issue] word 611 (增焓补气温度)
+    - source.row=592 无法解析协议行
+[issue] word 616 (吸气过热度)
+    - source.row=597 无法解析协议行
+[issue] word 627 (压缩机-L2电流)
+    - source.row=608 无法解析协议行
+[issue] word 648 (部件调试状态)
+    - source.row=629 无法解析协议行
+[issue] word 706 (制热耗电量(高字))
+    - source.row=682 无法解析协议行
+
+=== 提取警告评估 ===
+- line 750-753: 830-859 设备信息段缺地址

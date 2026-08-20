@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EMS Modbus Slave Device Profile",
+  "type": "object",
+  "required": ["profile_id", "name", "baudrate", "slave_id", "registers", "coils"],
+  "properties": {
+    "profile_id": { "type": "string" },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "source": { "type": "object" },
+    "slave_id": { "type": "integer", "minimum": 1, "maximum": 247 },
+    "baudrate": { "type": "integer" },
+    "serial": { "type": "object" },
+    "function_codes": {
+      "type": "array",
+      "items": { "type": "integer" }
+    },
+    "startup_preset": { "type": "string" },
+    "status_fields": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/statusField" }
+    },
+    "registers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/register" }
+    },
+    "coils": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/coil" }
+    }
+  },
+  "$defs": {
+    "statusField": {
+      "type": "object",
+      "required": ["label", "kind", "address"],
+      "properties": {
+        "label": { "type": "string" },
+        "kind": { "enum": ["register", "coil"] },
+        "address": { "type": "integer" },
+        "scale": { "type": "number" },
+        "suffix": { "type": "string" }
+      }
+    },
+    "register": {
+      "type": "object",
+      "required": ["address", "name", "access", "data_type", "default_raw"],
+      "properties": {
+        "address": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "address_label": { "type": "string" },
+        "name": { "type": "string" },
+        "key": { "type": "string" },
+        "access": { "enum": ["r", "rw"] },
+        "data_type": { "type": "string" },
+        "default_raw": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "min_raw": { "type": ["integer", "null"] },
+        "max_raw": { "type": ["integer", "null"] },
+        "unit": { "type": "string" },
+        "precision": { "type": "string" },
+        "transfer": { "type": "string" },
+        "enum": { "type": "object" },
+        "description": { "type": "string" },
+        "synthetic": { "type": "boolean" },
+        "source": { "type": "object" }
+      }
+    },
+    "coil": {
+      "type": "object",
+      "required": ["address", "name", "access", "default", "backing_register", "bit_offset"],
+      "properties": {
+        "address": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "address_label": { "type": "string" },
+        "name": { "type": "string" },
+        "key": { "type": "string" },
+        "access": { "enum": ["r", "rw"] },
+        "default": { "type": "boolean" },
+        "backing_register": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "bit_offset": { "type": "integer", "minimum": 0, "maximum": 15 },
+        "false_label": { "type": "string" },
+        "true_label": { "type": "string" },
+        "data_type": { "type": "string" },
+        "ui_level": { "type": "string" },
+        "description": { "type": "string" },
+        "source": { "type": "object" }
+      }
+    }
+  }
+}

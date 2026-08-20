@@ -10,9 +10,12 @@ import glob
 import json
 import logging
 import math
+import os
 import platform
 import re
+import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -38,7 +41,19 @@ FUNC_SIM_POWER = "sim_power"
 FUNC_SIM_READ = "sim_read"
 FUNC_SIM_WAIT = "sim_wait"
 FUNC_SET_SLAVE = "set_slave"
+FUNC_SLAVE_START = "slave_start"
+FUNC_SLAVE_STOP = "slave_stop"
+FUNC_SLAVE_WRITE = "slave_write"
+FUNC_SLAVE_READ = "slave_read"
+FUNC_SLAVE_WAIT = "slave_wait"
 SIM_FUNCS = {FUNC_SIM_CONTROL, FUNC_SIM_POWER, FUNC_SIM_READ, FUNC_SIM_WAIT}
+SLAVE_FUNCS = {
+    FUNC_SLAVE_START,
+    FUNC_SLAVE_STOP,
+    FUNC_SLAVE_WRITE,
+    FUNC_SLAVE_READ,
+    FUNC_SLAVE_WAIT,
+}
 VALID_FUNCS = {
     FUNC_WRITE,
     FUNC_WRITE_MULTI,
@@ -52,6 +67,7 @@ VALID_FUNCS = {
     FUNC_SIM_READ,
     FUNC_SIM_WAIT,
     FUNC_SET_SLAVE,
+    *SLAVE_FUNCS,
 }
 
 SIM_PROP_MAP: dict[str, str] = {
@@ -98,6 +114,10 @@ class SimApiError(Exception):
 
 class SimUnavailableError(SimApiError):
     """Raised when DeviceSimulator cannot be reached."""
+
+
+class SlaveControlError(Exception):
+    """Raised on EMS Modbus Slave control channel failure."""
 
 
 @dataclass(frozen=True)
@@ -156,6 +176,7 @@ class ExecutionContext:
     start_time_value: int | None = None
     time_addr: int = DEFAULT_TIME_ADDR
     sim: SimContext | None = None
+    slave: "SlaveContext | None" = None
 
 
 @dataclass
@@ -163,6 +184,26 @@ class SimContext:
     api_base: str
     http_timeout: float
     _index_to_sn: dict[int, str] = field(default_factory=dict)
+
+
+@dataclass
+class SlaveContext:
+    """Child process state for the EMS Modbus Slave (stdio JSON-RPC control)."""
+
+    app_path: str
+    port: str | None = None
+    profile: str = "dm_hp3_rs48_v2"
+    preset: str | None = None
+    baudrate: int | None = None
+    slave_id: int = 1
+    respond_1_40: bool = False
+    ready_timeout: float = 10.0
+    stop_timeout: float = 5.0
+    proc: subprocess.Popen | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    lines: list[str] = field(default_factory=list)
+    next_id: int = 1
+    started: bool = False
 
 
 @dataclass(frozen=True)
@@ -268,6 +309,57 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="HTTP request timeout for DeviceSimulator API (default: 5.0s)",
     )
     parser.add_argument(
+        "--slave-app",
+        default=None,
+        help="Path to the EMS Modbus Slave app.py (default: bundled ems_modbus_slave/app.py "
+        "next to the skill, overrides auto-detection)",
+    )
+    parser.add_argument(
+        "--slave-port",
+        default=None,
+        help="Serial port for the EMS Modbus Slave child process (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--slave-profile",
+        default="dm_hp3_rs48_v2",
+        help="Profile path or profile_id for the slave child process "
+        "(default: dm_hp3_rs48_v2)",
+    )
+    parser.add_argument(
+        "--slave-preset",
+        default=None,
+        help="Preset JSON path to apply to the slave child process (optional)",
+    )
+    parser.add_argument(
+        "--slave-baudrate",
+        type=int,
+        default=None,
+        help="Override the slave profile baudrate",
+    )
+    parser.add_argument(
+        "--slave-slave-id",
+        type=int,
+        default=1,
+        help="Default slave ID for the child process (default: 1)",
+    )
+    parser.add_argument(
+        "--slave-respond-1-40",
+        action="store_true",
+        help="Make the child process respond to Modbus slave ID 1..40",
+    )
+    parser.add_argument(
+        "--slave-ready-timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for the slave child process ready event (default: 10.0)",
+    )
+    parser.add_argument(
+        "--slave-stop-timeout",
+        type=float,
+        default=5.0,
+        help="Seconds to wait for graceful slave shutdown before kill (default: 5.0)",
+    )
+    parser.add_argument(
         "--log-dir",
         default="./logs",
         help="Directory for log files (default: ./logs)",
@@ -292,6 +384,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--time-addr must be >= 0")
     if args.sim_http_timeout <= 0:
         parser.error("--sim-http-timeout must be > 0")
+    if args.slave_ready_timeout <= 0:
+        parser.error("--slave-ready-timeout must be > 0")
+    if args.slave_stop_timeout <= 0:
+        parser.error("--slave-stop-timeout must be > 0")
+    if args.slave_slave_id < 1 or args.slave_slave_id > 247:
+        parser.error("--slave-slave-id must be 1-247")
     return args
 
 
@@ -486,7 +584,7 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
                     f"row {row_num}: DeviceIndex must be > 0 for {func}"
                 )
 
-            if not value_text and func != FUNC_READ_START_TIME:
+            if not value_text and func not in (FUNC_READ_START_TIME, FUNC_SLAVE_START, FUNC_SLAVE_STOP):
                 raise CsvParseError(f"row {row_num}: missing target value")
 
             if func == FUNC_WRITE:
@@ -515,6 +613,15 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
                     raise CsvParseError(
                         f"row {row_num}: slave id must be 1-247, got {sid}"
                     )
+            elif func in (FUNC_SLAVE_START, FUNC_SLAVE_STOP):
+                if addr != 0:
+                    raise CsvParseError(f"row {row_num}: {func} requires address 0")
+            elif func == FUNC_SLAVE_WRITE:
+                _parse_slave_write_spec(value_text, row_num)
+            elif func == FUNC_SLAVE_READ:
+                _parse_slave_read_spec(value_text, row_num)
+            elif func == FUNC_SLAVE_WAIT:
+                _parse_slave_wait_spec(value_text, row_num)
 
             steps.append(
                 Step(
@@ -888,6 +995,366 @@ def _validate_sim_wait_value(raw: str, row_num: int) -> None:
             raise CsvParseError(f"row {row_num}: sim_wait {key} must be > 0")
 
 
+def _parse_slave_slave_id_option(raw: str, row_num: int) -> int | None:
+    """Parse an optional 'slave_id=N' option; None when absent."""
+    parts = [part.strip() for part in raw.split(";")]
+    slave_id: int | None = None
+    for part in parts:
+        if not part:
+            continue
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if key.strip().lower() == "slave_id":
+            sid = parse_int(value.strip(), "slave_id", row_num)
+            if sid < 1 or sid > 247:
+                raise CsvParseError(f"row {row_num}: slave_id must be 1-247, got {sid}")
+            if slave_id is not None:
+                raise CsvParseError(f"row {row_num}: duplicate slave_id option")
+            slave_id = sid
+    return slave_id
+
+
+def default_slave_app_path() -> Path:
+    """Return the bundled EMS Modbus Slave app.py shipped with this skill.
+
+    The slave ships in ``ems_modbus_slave/`` next to the skill directory
+    (i.e. one level above ``scripts/``), which works both for the installed
+    copy (~/.agents/skills/yzc-modbus-test) and the source repo
+    (skills/modbus-test).
+    """
+    return Path(__file__).resolve().parents[1] / "ems_modbus_slave" / "app.py"
+
+
+def _parse_slave_write_spec(raw: str, row_num: int) -> tuple[list[tuple[int, int]], int | None]:
+    """Parse 'addr:value[;addr:value][;slave_id=N]' into (pairs, slave_id)."""
+    parts = [part.strip() for part in raw.split(";")]
+    pairs: list[tuple[int, int]] = []
+    slave_id: int | None = None
+    for part in parts:
+        if not part:
+            raise CsvParseError(f"row {row_num}: empty slave_write element")
+        if "=" in part:
+            key, value_text = part.split("=", 1)
+            if key.strip().lower() != "slave_id":
+                raise CsvParseError(
+                    f"row {row_num}: invalid slave_write element {part!r}; expected addr:value"
+                )
+            sid = parse_int(value_text.strip(), "slave_id", row_num)
+            if sid < 1 or sid > 247:
+                raise CsvParseError(f"row {row_num}: slave_id must be 1-247, got {sid}")
+            if slave_id is not None:
+                raise CsvParseError(f"row {row_num}: duplicate slave_id option")
+            slave_id = sid
+            continue
+        if ":" not in part:
+            raise CsvParseError(
+                f"row {row_num}: invalid slave_write element {part!r}; expected addr:value"
+            )
+        addr_text, value_text = part.split(":", 1)
+        addr = parse_int(addr_text.strip(), "slave address", row_num)
+        if addr < 0:
+            raise CsvParseError(f"row {row_num}: slave address must be >= 0, got {addr}")
+        value = parse_int(value_text.strip(), "slave value", row_num)
+        pairs.append((addr, value))
+    if not pairs:
+        raise CsvParseError(
+            f"row {row_num}: slave_write requires at least one addr:value pair"
+        )
+    return pairs, slave_id
+
+
+def _parse_slave_read_spec(raw: str, row_num: int) -> tuple[int, str, Any, str, int | None]:
+    """Parse 'addr:expected[;slave_id=N]' into (addr, kind, expected, label, slave_id)."""
+    main_part, options = _split_slave_main_option(raw, row_num, "slave_read")
+    if ":" not in main_part:
+        raise CsvParseError(
+            f"row {row_num}: slave_read value must be addr:expected[;slave_id=N]"
+        )
+    addr_text, expected_text = main_part.split(":", 1)
+    addr = parse_int(addr_text.strip(), "slave address", row_num)
+    if addr < 0:
+        raise CsvParseError(f"row {row_num}: slave address must be >= 0, got {addr}")
+    kind, expected = parse_expected(expected_text, row_num)
+    label = expected_label(kind, expected)
+    slave_id = _parse_slave_options(options, row_num, "slave_read")
+    return addr, kind, expected, label, slave_id
+
+
+def _parse_slave_wait_spec(
+    raw: str, row_num: int
+) -> tuple[int, str, Any, str, float, float, int | None]:
+    """Parse 'addr:expected[;timeout=N][;interval=M][;slave_id=N]'."""
+    main_part, options = _split_slave_main_option(raw, row_num, "slave_wait")
+    if ":" not in main_part:
+        raise CsvParseError(
+            f"row {row_num}: slave_wait value must be addr:expected[;timeout=N][;interval=M][;slave_id=N]"
+        )
+    addr_text, expected_text = main_part.split(":", 1)
+    addr = parse_int(addr_text.strip(), "slave address", row_num)
+    if addr < 0:
+        raise CsvParseError(f"row {row_num}: slave address must be >= 0, got {addr}")
+    kind, expected = parse_expected(expected_text, row_num)
+    label = expected_label(kind, expected)
+    timeout_s = 0.0
+    interval_s = 1.0
+    slave_id: int | None = None
+    seen_keys: set[str] = set()
+    for option in options:
+        if not option:
+            raise CsvParseError(f"row {row_num}: empty slave_wait option")
+        if "=" not in option:
+            raise CsvParseError(
+                f"row {row_num}: invalid slave_wait option {option!r}; expected key=value"
+            )
+        key, value_text = option.split("=", 1)
+        key = key.strip().lower().replace("-", "_")
+        if not key:
+            raise CsvParseError(f"row {row_num}: invalid slave_wait option {option!r}")
+        if key in seen_keys:
+            raise CsvParseError(f"row {row_num}: duplicate slave_wait option {key!r}")
+        seen_keys.add(key)
+        if key == "timeout":
+            timeout_s = parse_positive_float(value_text, "slave_wait timeout", row_num)
+        elif key == "interval":
+            interval_s = parse_positive_float(value_text, "slave_wait interval", row_num)
+        elif key == "slave_id":
+            sid = parse_int(value_text, "slave_id", row_num)
+            if sid < 1 or sid > 247:
+                raise CsvParseError(f"row {row_num}: slave_id must be 1-247, got {sid}")
+            slave_id = sid
+        else:
+            raise CsvParseError(f"row {row_num}: unsupported slave_wait option {key!r}")
+    return addr, kind, expected, label, timeout_s, interval_s, slave_id
+
+
+def _split_slave_main_option(raw: str, row_num: int, func: str) -> tuple[str, list[str]]:
+    text = raw.strip()
+    if not text:
+        raise CsvParseError(f"row {row_num}: missing value")
+    parts = [part.strip() for part in text.split(";")]
+    if not parts or not parts[0]:
+        raise CsvParseError(f"row {row_num}: missing value")
+    return parts[0], parts[1:]
+
+
+def _parse_slave_options(options: list[str], row_num: int, func: str) -> int | None:
+    seen_keys: set[str] = set()
+    slave_id: int | None = None
+    for option in options:
+        if not option:
+            raise CsvParseError(f"row {row_num}: empty {func} option")
+        if "=" not in option:
+            raise CsvParseError(
+                f"row {row_num}: invalid {func} option {option!r}; expected key=value"
+            )
+        key, value_text = option.split("=", 1)
+        key = key.strip().lower().replace("-", "_")
+        if not key:
+            raise CsvParseError(f"row {row_num}: invalid {func} option {option!r}")
+        if key in seen_keys:
+            raise CsvParseError(f"row {row_num}: duplicate {func} option {key!r}")
+        seen_keys.add(key)
+        if key != "slave_id":
+            raise CsvParseError(f"row {row_num}: unsupported {func} option {key!r}")
+        sid = parse_int(value_text, "slave_id", row_num)
+        if sid < 1 or sid > 247:
+            raise CsvParseError(f"row {row_num}: slave_id must be 1-247, got {sid}")
+        slave_id = sid
+    return slave_id
+
+
+def slave_spawn(slave: SlaveContext) -> None:
+    """Spawn the EMS Modbus Slave child process in --cli --stdio-control mode."""
+    app_path = Path(slave.app_path)
+    if not app_path.is_file():
+        raise SlaveControlError(f"slave app not found: {app_path}")
+
+    command = [sys.executable, str(app_path), "--cli", "--stdio-control"]
+    if slave.port:
+        command += ["--port", slave.port]
+    if slave.profile:
+        command += ["--profile", slave.profile]
+    if slave.preset:
+        command += ["--preset", slave.preset]
+    if slave.baudrate:
+        command += ["--baudrate", str(slave.baudrate)]
+    if slave.slave_id:
+        command += ["--slave-id", str(slave.slave_id)]
+    if slave.respond_1_40:
+        command += ["--respond-1-40"]
+
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    logging.getLogger(LOG_LOGGER_NAME).info("Spawning slave: %s", " ".join(command))
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags,
+        )
+    except OSError as exc:
+        raise SlaveControlError(f"failed to launch slave app: {exc}") from exc
+
+    slave.proc = proc
+
+    def _reader() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            with slave.lock:
+                slave.lines.append(line.rstrip("\r\n"))
+
+    threading.Thread(target=_reader, daemon=True, name="slave-stdout").start()
+
+
+def slave_collect_logs(slave: SlaveContext, limit: int = 12) -> str:
+    with slave.lock:
+        snapshot = list(slave.lines)
+    if not snapshot:
+        return "no slave output yet"
+    return "; ".join(snapshot[-limit:])
+
+
+def slave_wait_ready(slave: SlaveContext) -> dict[str, Any]:
+    """Wait for the slave ready (or error) event within the ready timeout."""
+    deadline = time.monotonic() + slave.ready_timeout
+    while time.monotonic() < deadline:
+        proc = slave.proc
+        if proc is None or proc.poll() is not None:
+            exit_code = proc.poll() if proc is not None else None
+            raise SlaveControlError(
+                f"slave process exited before ready (code={exit_code}): {slave_collect_logs(slave)}"
+            )
+        with slave.lock:
+            for line in slave.lines:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                msg_type = message.get("type")
+                if msg_type == "ready":
+                    return message
+                if msg_type == "error":
+                    raise SlaveControlError(
+                        f"slave startup failed: {message.get('message', line)}"
+                    )
+        time.sleep(0.05)
+    raise SlaveControlError(
+        f"slave not ready within {format_seconds(slave.ready_timeout)}s: "
+        f"{slave_collect_logs(slave)}"
+    )
+
+
+def slave_command(slave: SlaveContext, op: str, timeout_s: float = 10.0, **params: Any) -> dict[str, Any]:
+    """Send one JSON-RPC request and wait for the matching response."""
+    proc = slave.proc
+    if proc is None or proc.poll() is not None:
+        raise SlaveControlError(
+            f"slave process not running (op={op}): {slave_collect_logs(slave)}"
+        )
+
+    with slave.lock:
+        request_id = slave.next_id
+        slave.next_id += 1
+    payload = {"type": "request", "id": request_id, "op": op, **params}
+    command_line = json.dumps(payload)
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(command_line + "\n")
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError) as exc:
+        raise SlaveControlError(f"failed to send command {op}: {exc}") from exc
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise SlaveControlError(
+                f"slave process exited during {op} (code={proc.poll()}): "
+                f"{slave_collect_logs(slave)}"
+            )
+        with slave.lock:
+            for line in slave.lines:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if message.get("type") == "response" and message.get("id") == request_id:
+                    if not message.get("ok", False):
+                        raise SlaveControlError(
+                            f"slave op {op} failed: {message.get('error', 'unknown error')}"
+                        )
+                    return message
+        time.sleep(0.02)
+    raise SlaveControlError(
+        f"slave op {op} timed out after {format_seconds(timeout_s)}s: "
+        f"{slave_collect_logs(slave)}"
+    )
+
+
+def slave_read_register(slave: SlaveContext, addr: int, slave_id: int | None) -> int:
+    params: dict[str, Any] = {"address": addr}
+    if slave_id is not None:
+        params["slave_id"] = slave_id
+    response = slave_command(slave, "get_register", **params)
+    value = response.get("value")
+    if not isinstance(value, int):
+        raise SlaveControlError(f"slave get_register returned unexpected value: {value!r}")
+    return value
+
+
+def slave_write_register(slave: SlaveContext, addr: int, value: int, slave_id: int | None) -> None:
+    params: dict[str, Any] = {"address": addr, "value": value}
+    if slave_id is not None:
+        params["slave_id"] = slave_id
+    slave_command(slave, "set_register", **params)
+
+
+def slave_shutdown(slave: SlaveContext) -> None:
+    """Gracefully stop the slave child process; kill as a fallback."""
+    proc = slave.proc
+    if proc is None:
+        return
+    if proc.poll() is None:
+        try:
+            slave_command(slave, "shutdown", timeout_s=min(slave.stop_timeout, 10.0))
+        except SlaveControlError as exc:
+            logging.getLogger(LOG_LOGGER_NAME).warning("Graceful slave shutdown failed: %s", exc)
+        try:
+            proc.wait(timeout=slave.stop_timeout)
+        except subprocess.TimeoutExpired:
+            slave_kill(slave)
+    slave.proc = None
+    slave.started = False
+
+
+def slave_kill(slave: SlaveContext) -> None:
+    proc = slave.proc
+    if proc is None:
+        return
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    slave.proc = None
+    slave.started = False
+
+
+def has_slave_steps(steps: list[Step]) -> bool:
+    return any(step.func in SLAVE_FUNCS for step in steps)
+
+
 def _sim_http_json(sim: SimContext, method: str, path: str, body: dict | None = None) -> Any:
     url = sim.api_base.rstrip("/") + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -1028,6 +1495,8 @@ def _normalize_sim_actual(prop_key: str, raw_value: Any) -> int:
 
 def requires_serial(step: Step) -> bool:
     if step.func in SIM_FUNCS:
+        return False
+    if step.func in SLAVE_FUNCS:
         return False
     if step.func == FUNC_DELAY:
         return step.addr != 0
@@ -1444,6 +1913,132 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
         )
         return StepResult(index, step.func, "FAIL", summary, detail)
 
+    if step.func == FUNC_SLAVE_START:
+        summary = "slave_start"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.slave is None:
+            return StepResult(
+                index, step.func, "FAIL", summary, "slave not configured (--slave-app)"
+            )
+        if ctx.slave.started:
+            return StepResult(
+                index, step.func, "FAIL", summary, "slave already started"
+            )
+        try:
+            slave_spawn(ctx.slave)
+            ready = slave_wait_ready(ctx.slave)
+            ctx.slave.started = True
+            detail = f"pid={ready.get('pid')} port={ready.get('port')} profile={ready.get('profile')}"
+            return StepResult(index, step.func, "PASS", summary, detail)
+        except SlaveControlError as exc:
+            slave_kill(ctx.slave)
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_SLAVE_STOP:
+        summary = "slave_stop"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.slave is None or not ctx.slave.started:
+            return StepResult(
+                index, step.func, "FAIL", summary, "slave not started"
+            )
+        proc = ctx.slave.proc
+        try:
+            slave_shutdown(ctx.slave)
+            exit_code = proc.poll() if proc is not None else None
+            return StepResult(
+                index, step.func, "PASS", summary,
+                f"exit={exit_code}",
+            )
+        except SlaveControlError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_SLAVE_WRITE:
+        pairs, slave_id = _parse_slave_write_spec(step.value, step.row_num)
+        summary = "slave_write dev={} {}".format(
+            step.addr,
+            ";".join(f"{addr}:{value}" for addr, value in pairs),
+        )
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.slave is None or not ctx.slave.started:
+            return StepResult(
+                index, step.func, "FAIL", summary, "slave not started"
+            )
+        try:
+            for addr, value in pairs:
+                slave_write_register(ctx.slave, addr, value, slave_id)
+            return StepResult(index, step.func, "PASS", summary)
+        except SlaveControlError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_SLAVE_READ:
+        addr, kind, expected, label, slave_id = _parse_slave_read_spec(
+            step.value, step.row_num
+        )
+        summary = f"slave_read dev={step.addr} addr={addr} expected={label}"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.slave is None or not ctx.slave.started:
+            return StepResult(
+                index, step.func, "FAIL", summary, "slave not started"
+            )
+        try:
+            actual = slave_read_register(ctx.slave, addr, slave_id)
+        except SlaveControlError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+        detail = f"expected={label} actual={actual}"
+        if matches_expected(actual, kind, expected):
+            return StepResult(index, step.func, "PASS", summary, detail)
+        return StepResult(index, step.func, "FAIL", summary, detail)
+
+    if step.func == FUNC_SLAVE_WAIT:
+        addr, kind, expected, label, inline_timeout, interval_s, slave_id = (
+            _parse_slave_wait_spec(step.value, step.row_num)
+        )
+        timeout_s = inline_timeout if inline_timeout > 0 else float(ctx.wait_timeout)
+        summary = (
+            f"slave_wait dev={step.addr} addr={addr} expected={label} "
+            f"timeout={format_seconds(timeout_s)}s"
+        )
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.slave is None or not ctx.slave.started:
+            return StepResult(
+                index, step.func, "FAIL", summary, "slave not started"
+            )
+        wait_started = time.monotonic()
+        deadline = wait_started + timeout_s
+        last_actual: int | None = None
+        last_error = ""
+        while True:
+            ensure_session_time(ctx)
+            try:
+                actual = slave_read_register(ctx.slave, addr, slave_id)
+                last_actual = actual
+                if matches_expected(actual, kind, expected):
+                    return StepResult(
+                        index, step.func, "PASS", summary,
+                        f"expected={label} actual={actual}",
+                    )
+                last_error = f"expected={label} actual={actual}"
+            except SlaveControlError as exc:
+                last_error = str(exc)
+
+            if time.monotonic() >= deadline:
+                break
+            sleep_with_session_check(ctx, min(interval_s, deadline - time.monotonic()))
+
+        detail = build_wait_timeout_detail(
+            label=label,
+            last_actual=last_actual,
+            last_error=last_error,
+            elapsed_s=time.monotonic() - wait_started,
+            timeout_s=timeout_s,
+        )
+        return StepResult(index, step.func, "FAIL", summary, detail)
+
     if step.func == FUNC_READ_START_TIME:
         summary = f"read_start_time {ctx.time_addr}"
         if ctx.dry_run:
@@ -1602,11 +2197,38 @@ def main() -> int:
     session_has_sim_steps = any(
         has_sim_steps(prepared.steps or []) for prepared in valid_files
     )
+    session_has_slave_steps = any(
+        has_slave_steps(prepared.steps or []) for prepared in valid_files
+    )
 
     if session_has_sim_steps and not args.sim_api and not args.dry_run:
         logger.error("CSV contains sim_* operations but --sim-api is not set")
         print("ERROR: CSV contains sim_* operations but --sim-api is not set", file=sys.stderr)
         return 2
+
+    if session_has_slave_steps and not args.slave_app and not args.dry_run:
+        bundled = default_slave_app_path()
+        if bundled.is_file():
+            args.slave_app = str(bundled)
+            logger.info("Using bundled EMS Modbus Slave: %s", args.slave_app)
+        else:
+            logger.error(
+                "CSV contains slave_* operations but --slave-app is not set "
+                "and bundled slave not found at %s",
+                bundled,
+            )
+            print(
+                f"ERROR: CSV contains slave_* operations but --slave-app is not set; "
+                f"no bundled slave at {bundled}",
+                file=sys.stderr,
+            )
+            return 2
+
+    if args.slave_app and session_has_slave_steps and not args.dry_run:
+        if not Path(args.slave_app).is_file():
+            logger.error("Slave app not found: %s", args.slave_app)
+            print(f"ERROR: slave app not found: {args.slave_app}", file=sys.stderr)
+            return 2
 
     sim_ctx: SimContext | None = None
     sim_unavailable = False
@@ -1654,6 +2276,21 @@ def main() -> int:
             return 2
 
     session_deadline = time.monotonic() + args.session_timeout
+
+    slave_ctx: SlaveContext | None = None
+    if session_has_slave_steps and not args.dry_run and args.slave_app:
+        slave_ctx = SlaveContext(
+            app_path=args.slave_app,
+            port=args.slave_port,
+            profile=args.slave_profile,
+            preset=args.slave_preset,
+            baudrate=args.slave_baudrate,
+            slave_id=args.slave_slave_id,
+            respond_1_40=args.slave_respond_1_40,
+            ready_timeout=args.slave_ready_timeout,
+            stop_timeout=args.slave_stop_timeout,
+        )
+
     ctx = ExecutionContext(
         client=client,
         slave_id=args.slave_id,
@@ -1664,6 +2301,7 @@ def main() -> int:
         dry_run=args.dry_run,
         time_addr=args.time_addr,
         sim=sim_ctx,
+        slave=slave_ctx,
     )
 
     results: list[FileResult] = []
@@ -1693,6 +2331,9 @@ def main() -> int:
     finally:
         if client is not None:
             client.close()
+        if slave_ctx is not None and slave_ctx.started and slave_ctx.proc is not None:
+            logger.warning("Slave still running at session end; force stopping")
+            slave_kill(slave_ctx)
 
     print_errors(results)
 
