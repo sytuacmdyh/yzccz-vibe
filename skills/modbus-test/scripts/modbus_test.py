@@ -46,6 +46,12 @@ FUNC_SLAVE_STOP = "slave_stop"
 FUNC_SLAVE_WRITE = "slave_write"
 FUNC_SLAVE_READ = "slave_read"
 FUNC_SLAVE_WAIT = "slave_wait"
+FUNC_MQTT_START = "mqtt_start"
+FUNC_MQTT_STOP = "mqtt_stop"
+FUNC_MQTT_SEND = "mqtt_send"
+FUNC_MQTT_WAIT = "mqtt_wait"
+FUNC_MQTT_WATCH = "mqtt_watch"
+FUNC_MQTT_SET = "mqtt_set"
 SIM_FUNCS = {FUNC_SIM_CONTROL, FUNC_SIM_POWER, FUNC_SIM_READ, FUNC_SIM_WAIT}
 SLAVE_FUNCS = {
     FUNC_SLAVE_START,
@@ -53,6 +59,14 @@ SLAVE_FUNCS = {
     FUNC_SLAVE_WRITE,
     FUNC_SLAVE_READ,
     FUNC_SLAVE_WAIT,
+}
+MQTT_FUNCS = {
+    FUNC_MQTT_START,
+    FUNC_MQTT_STOP,
+    FUNC_MQTT_SEND,
+    FUNC_MQTT_WAIT,
+    FUNC_MQTT_WATCH,
+    FUNC_MQTT_SET,
 }
 VALID_FUNCS = {
     FUNC_WRITE,
@@ -68,6 +82,7 @@ VALID_FUNCS = {
     FUNC_SIM_WAIT,
     FUNC_SET_SLAVE,
     *SLAVE_FUNCS,
+    *MQTT_FUNCS,
 }
 
 SIM_PROP_MAP: dict[str, str] = {
@@ -95,6 +110,31 @@ SIM_CONTROL_WHITELIST = {
 SIM_POWER_ON_VALUES = {"on", "true", "1"}
 SIM_POWER_OFF_VALUES = {"off", "false", "0"}
 
+MQTT_SET_KEYS: dict[str, str] = {
+    "host": "str",
+    "port": "int",
+    "path": "str",
+    "username": "str",
+    "password": "str",
+    "product_id": "str",
+    "device_id": "str",
+    "qos": "int",
+    "ack_timeout": "int",
+    "timeout": "int",
+    "connect_timeout": "int",
+    "subscribe_all": "bool",
+    "expect_ack_code": "int",
+}
+MQTT_SET_INT_KEYS = {
+    "port",
+    "qos",
+    "ack_timeout",
+    "timeout",
+    "connect_timeout",
+    "expect_ack_code",
+}
+MQTT_SET_BOOL_KEYS = {"subscribe_all"}
+
 
 class CsvParseError(Exception):
     """Raised when CSV content is invalid."""
@@ -118,6 +158,10 @@ class SimUnavailableError(SimApiError):
 
 class SlaveControlError(Exception):
     """Raised on EMS Modbus Slave control channel failure."""
+
+
+class MqttControlError(Exception):
+    """Raised on EMS MQTT master daemon control channel failure."""
 
 
 @dataclass(frozen=True)
@@ -172,11 +216,13 @@ class ExecutionContext:
     wait_timeout: int
     wait_interval: float
     session_deadline: float | None
-    dry_run: bool
+    session_timeout: int = 60
+    dry_run: bool = False
     start_time_value: int | None = None
     time_addr: int = DEFAULT_TIME_ADDR
     sim: SimContext | None = None
     slave: "SlaveContext | None" = None
+    mqtt: "MqttContext | None" = None
 
 
 @dataclass
@@ -204,6 +250,27 @@ class SlaveContext:
     lines: list[str] = field(default_factory=list)
     next_id: int = 1
     started: bool = False
+
+
+@dataclass
+class MqttContext:
+    """Child process state for the EMS MQTT master daemon (stdio JSON-RPC control).
+
+    ``config_overrides`` accumulates ``mqtt_set`` steps; it is sent to the daemon
+    with the ``connect`` op at ``mqtt_start`` and persists for the session.
+    """
+
+    app_path: str
+    config_path: str | None = None
+    connect_timeout: float = 15.0
+    stop_timeout: float = 5.0
+    config_overrides: dict[str, Any] = field(default_factory=dict)
+    proc: subprocess.Popen | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    lines: list[str] = field(default_factory=list)
+    next_id: int = 1
+    started: bool = False
+    connected: bool = False
 
 
 @dataclass(frozen=True)
@@ -279,8 +346,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--session-timeout",
         type=int,
-        default=120,
-        help="Maximum run time in seconds for the whole session",
+        default=60,
+        help="Maximum idle time in seconds since last PASS; resets on each PASS (default: 60)",
     )
     parser.add_argument(
         "--encoding",
@@ -360,6 +427,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Seconds to wait for graceful slave shutdown before kill (default: 5.0)",
     )
     parser.add_argument(
+        "--mqtt-app",
+        default=None,
+        help="Path to the EMS MQTT master app_cli.py (default: bundled "
+        "ems_mqtt_master/app_cli.py next to the skill)",
+    )
+    parser.add_argument(
+        "--mqtt-config",
+        default=None,
+        help="Path to the MQTT config.json used by the master daemon "
+        "(default: bundled ems_mqtt_master/config/config.json)",
+    )
+    parser.add_argument(
+        "--mqtt-connect-timeout",
+        type=float,
+        default=15.0,
+        help="Seconds to wait for the mqtt daemon ready/connect (default: 15.0)",
+    )
+    parser.add_argument(
+        "--mqtt-stop-timeout",
+        type=float,
+        default=5.0,
+        help="Seconds to wait for graceful mqtt daemon shutdown before kill (default: 5.0)",
+    )
+    parser.add_argument(
         "--log-dir",
         default="./logs",
         help="Directory for log files (default: ./logs)",
@@ -390,6 +481,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--slave-stop-timeout must be > 0")
     if args.slave_slave_id < 1 or args.slave_slave_id > 247:
         parser.error("--slave-slave-id must be 1-247")
+    if args.mqtt_connect_timeout <= 0:
+        parser.error("--mqtt-connect-timeout must be > 0")
+    if args.mqtt_stop_timeout <= 0:
+        parser.error("--mqtt-stop-timeout must be > 0")
     return args
 
 
@@ -584,7 +679,13 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
                     f"row {row_num}: DeviceIndex must be > 0 for {func}"
                 )
 
-            if not value_text and func not in (FUNC_READ_START_TIME, FUNC_SLAVE_START, FUNC_SLAVE_STOP):
+            if not value_text and func not in (
+                FUNC_READ_START_TIME,
+                FUNC_SLAVE_START,
+                FUNC_SLAVE_STOP,
+                FUNC_MQTT_START,
+                FUNC_MQTT_STOP,
+            ):
                 raise CsvParseError(f"row {row_num}: missing target value")
 
             if func == FUNC_WRITE:
@@ -622,6 +723,19 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
                 _parse_slave_read_spec(value_text, row_num)
             elif func == FUNC_SLAVE_WAIT:
                 _parse_slave_wait_spec(value_text, row_num)
+            elif func in MQTT_FUNCS:
+                if addr != 0:
+                    raise CsvParseError(
+                        f"row {row_num}: {func} requires address 0, got {addr}"
+                    )
+                if func == FUNC_MQTT_SEND:
+                    _parse_mqtt_send_value(value_text, row_num)
+                elif func == FUNC_MQTT_WAIT:
+                    _parse_mqtt_wait_value(value_text, row_num)
+                elif func == FUNC_MQTT_WATCH:
+                    _parse_mqtt_watch_value(value_text, row_num)
+                elif func == FUNC_MQTT_SET:
+                    _parse_mqtt_set_value(value_text, row_num)
 
             steps.append(
                 Step(
@@ -1164,6 +1278,167 @@ def _parse_slave_options(options: list[str], row_num: int, func: str) -> int | N
     return slave_id
 
 
+# ── mqtt_* value parsing ────────────────────────────────────────────
+
+def _parse_mqtt_send_value(
+    raw: str, row_num: int
+) -> tuple[dict[str, Any], int | None, float | None]:
+    """Parse '<json-envelope>[;expect=N][;timeout=N]' into (envelope, expect, timeout).
+
+    Options are split off from the right until the remainder parses as JSON, so a
+    JSON string containing ';' (e.g. inside a description field) is tolerated.
+    """
+    text = raw.strip()
+    if not text:
+        raise CsvParseError(f"row {row_num}: missing mqtt_send envelope")
+    expect: int | None = None
+    timeout: float | None = None
+    seen: set[str] = set()
+    while True:
+        try:
+            envelope = json.loads(text)
+            break
+        except json.JSONDecodeError:
+            if ";" not in text:
+                raise CsvParseError(
+                    f"row {row_num}: mqtt_send value must be a JSON envelope with "
+                    f"optional ;expect=N / ;timeout=N options"
+                )
+            head, _, tail = text.rpartition(";")
+            if not head or "=" not in tail:
+                raise CsvParseError(
+                    f"row {row_num}: mqtt_send invalid trailing option {tail!r}"
+                )
+            key, value_text = tail.split("=", 1)
+            key = key.strip().lower().replace("-", "_")
+            if not key or key in seen:
+                raise CsvParseError(
+                    f"row {row_num}: mqtt_send duplicate/invalid option {key!r}"
+                )
+            seen.add(key)
+            if key == "expect":
+                expect = parse_int(value_text, "mqtt_send expect", row_num)
+            elif key == "timeout":
+                timeout = parse_positive_float(value_text, "mqtt_send timeout", row_num)
+            else:
+                raise CsvParseError(
+                    f"row {row_num}: unsupported mqtt_send option {key!r}"
+                )
+            text = head
+    if not isinstance(envelope, dict):
+        raise CsvParseError(f"row {row_num}: mqtt_send envelope must be a JSON object")
+    if not isinstance(envelope.get("method"), str):
+        raise CsvParseError(
+            f"row {row_num}: mqtt_send envelope must contain a string 'method'"
+        )
+    return envelope, expect, timeout
+
+
+def _parse_mqtt_wait_value(
+    raw: str, row_num: int
+) -> tuple[str | None, str | None, int | None, float]:
+    """Parse 'method=X;id=Y;code=Z;timeout=N' (at least one match criterion)."""
+    text = raw.strip()
+    if not text:
+        raise CsvParseError(f"row {row_num}: missing mqtt_wait criteria")
+    method: str | None = None
+    rid: str | None = None
+    code: int | None = None
+    timeout: float | None = None
+    seen: set[str] = set()
+    for part in text.split(";"):
+        if not part:
+            raise CsvParseError(f"row {row_num}: empty mqtt_wait option")
+        if "=" not in part:
+            raise CsvParseError(f"row {row_num}: invalid mqtt_wait option {part!r}")
+        key, value_text = part.split("=", 1)
+        key = key.strip().lower().replace("-", "_")
+        if not key or key in seen:
+            raise CsvParseError(f"row {row_num}: duplicate/invalid mqtt_wait option {key!r}")
+        seen.add(key)
+        if key == "method":
+            method = value_text.strip()
+        elif key == "id":
+            rid = value_text.strip()
+        elif key == "code":
+            code = parse_int(value_text, "mqtt_wait code", row_num)
+        elif key == "timeout":
+            timeout = parse_positive_float(value_text, "mqtt_wait timeout", row_num)
+        else:
+            raise CsvParseError(f"row {row_num}: unsupported mqtt_wait option {key!r}")
+    if method is None and rid is None and code is None:
+        raise CsvParseError(
+            f"row {row_num}: mqtt_wait requires at least one of method/id/code"
+        )
+    return method, rid, code, timeout if timeout is not None else 0.0
+
+
+def _parse_mqtt_watch_value(raw: str, row_num: int) -> float:
+    """Parse watch seconds; empty value uses the daemon default."""
+    text = raw.strip()
+    if not text:
+        return 0.0
+    return parse_positive_float(text, "mqtt_watch seconds", row_num)
+
+
+def _parse_mqtt_set_value(raw: str, row_num: int) -> dict[str, Any]:
+    """Parse 'key=value[;key=value]' into a validated config override dict."""
+    text = raw.strip()
+    if not text:
+        raise CsvParseError(f"row {row_num}: missing mqtt_set options")
+    overrides: dict[str, Any] = {}
+    seen: set[str] = set()
+    for part in text.split(";"):
+        if not part:
+            raise CsvParseError(f"row {row_num}: empty mqtt_set option")
+        if "=" not in part:
+            raise CsvParseError(f"row {row_num}: invalid mqtt_set option {part!r}")
+        key, value_text = part.split("=", 1)
+        key = key.strip().lower().replace("-", "_")
+        if key == "ack_timeout":
+            key = "timeout"
+        if key not in MQTT_SET_KEYS:
+            raise CsvParseError(
+                f"row {row_num}: unsupported mqtt_set key {key!r}; "
+                f"expected one of {', '.join(sorted(MQTT_SET_KEYS))}"
+            )
+        if key in seen:
+            raise CsvParseError(f"row {row_num}: duplicate mqtt_set option {key!r}")
+        seen.add(key)
+        value_text = value_text.strip()
+        if key in MQTT_SET_INT_KEYS:
+            value = parse_int(value_text, f"mqtt_set {key}", row_num)
+            if key == "qos" and not 0 <= value <= 2:
+                raise CsvParseError(f"row {row_num}: mqtt_set qos must be 0-2, got {value}")
+            if value < 0:
+                raise CsvParseError(f"row {row_num}: mqtt_set {key} must be >= 0, got {value}")
+        elif key in MQTT_SET_BOOL_KEYS:
+            lowered = value_text.lower()
+            if lowered in SIM_POWER_ON_VALUES:
+                value = True
+            elif lowered in SIM_POWER_OFF_VALUES:
+                value = False
+            else:
+                raise CsvParseError(
+                    f"row {row_num}: mqtt_set {key} must be true/false/1/0, got {value_text!r}"
+                )
+        else:
+            if not value_text:
+                raise CsvParseError(f"row {row_num}: mqtt_set {key} value is empty")
+            value = value_text
+        overrides[key] = value
+    return overrides
+
+
+def default_mqtt_app_path() -> Path:
+    """Return the bundled EMS MQTT master app_cli.py shipped with this skill."""
+    return Path(__file__).resolve().parents[1] / "ems_mqtt_master" / "app_cli.py"
+
+
+def has_mqtt_steps(steps: list[Step]) -> bool:
+    return any(step.func in MQTT_FUNCS for step in steps)
+
+
 def slave_spawn(slave: SlaveContext) -> None:
     """Spawn the EMS Modbus Slave child process in --cli --stdio-control mode."""
     app_path = Path(slave.app_path)
@@ -1355,6 +1630,231 @@ def has_slave_steps(steps: list[Step]) -> bool:
     return any(step.func in SLAVE_FUNCS for step in steps)
 
 
+def mqtt_spawn(mqtt: MqttContext) -> None:
+    """Spawn the EMS MQTT master daemon in stdio JSON-RPC mode."""
+    app_path = Path(mqtt.app_path)
+    if not app_path.is_file():
+        raise MqttControlError(f"mqtt app not found: {app_path}")
+
+    command = [sys.executable, str(app_path), "session", "--stdio"]
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    logging.getLogger(LOG_LOGGER_NAME).info(
+        "Spawning mqtt daemon: %s", " ".join(command)
+    )
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags,
+        )
+    except OSError as exc:
+        raise MqttControlError(f"failed to launch mqtt app: {exc}") from exc
+
+    mqtt.proc = proc
+
+    def _reader() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            with mqtt.lock:
+                mqtt.lines.append(line.rstrip("\r\n"))
+
+    threading.Thread(target=_reader, daemon=True, name="mqtt-stdout").start()
+
+
+def mqtt_collect_logs(mqtt: MqttContext, limit: int = 12) -> str:
+    with mqtt.lock:
+        snapshot = list(mqtt.lines)
+    if not snapshot:
+        return "no mqtt output yet"
+    return "; ".join(snapshot[-limit:])
+
+
+def mqtt_wait_ready(mqtt: MqttContext) -> None:
+    """Wait for the daemon ready event within the connect timeout."""
+    deadline = time.monotonic() + mqtt.connect_timeout
+    while time.monotonic() < deadline:
+        proc = mqtt.proc
+        if proc is None or proc.poll() is not None:
+            exit_code = proc.poll() if proc is not None else None
+            raise MqttControlError(
+                f"mqtt daemon exited before ready (code={exit_code}): {mqtt_collect_logs(mqtt)}"
+            )
+        with mqtt.lock:
+            for line in mqtt.lines:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                msg_type = message.get("type")
+                if msg_type == "ready":
+                    return
+                if msg_type == "error":
+                    raise MqttControlError(
+                        f"mqtt daemon startup failed: {message.get('message', line)}"
+                    )
+        time.sleep(0.05)
+    raise MqttControlError(
+        f"mqtt daemon not ready within {format_seconds(mqtt.connect_timeout)}s: "
+        f"{mqtt_collect_logs(mqtt)}"
+    )
+
+
+def mqtt_command(
+    mqtt: MqttContext, op: str, timeout_s: float = 10.0, **params: Any
+) -> dict[str, Any]:
+    """Send one JSON-RPC request and wait for the matching response."""
+    proc = mqtt.proc
+    if proc is None or proc.poll() is not None:
+        raise MqttControlError(
+            f"mqtt daemon not running (op={op}): {mqtt_collect_logs(mqtt)}"
+        )
+
+    with mqtt.lock:
+        request_id = mqtt.next_id
+        mqtt.next_id += 1
+    payload = {"type": "request", "id": request_id, "op": op, **params}
+    command_line = json.dumps(payload)
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(command_line + "\n")
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError) as exc:
+        raise MqttControlError(f"failed to send command {op}: {exc}") from exc
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise MqttControlError(
+                f"mqtt daemon exited during {op} (code={proc.poll()}): "
+                f"{mqtt_collect_logs(mqtt)}"
+            )
+        with mqtt.lock:
+            for line in mqtt.lines:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if message.get("type") == "response" and message.get("id") == request_id:
+                    if not message.get("ok", False):
+                        raise MqttControlError(
+                            f"mqtt op {op} failed: {message.get('error', 'unknown error')}"
+                        )
+                    return message
+        time.sleep(0.02)
+    raise MqttControlError(
+        f"mqtt op {op} timed out after {format_seconds(timeout_s)}s: "
+        f"{mqtt_collect_logs(mqtt)}"
+    )
+
+
+def mqtt_connect(mqtt: MqttContext) -> dict[str, Any]:
+    """Establish the MQTT connection with the accumulated config overrides."""
+    params: dict[str, Any] = {"config": dict(mqtt.config_overrides)}
+    if mqtt.config_path:
+        params["config_path"] = mqtt.config_path
+    return mqtt_command(mqtt, "connect", **params)
+
+
+def mqtt_effective_config(mqtt: MqttContext) -> dict[str, Any]:
+    """Resolve the effective MQTT config in the parent process.
+
+    Same precedence as the daemon ``connect`` op: bundled ``config/config.json``
+    (when no ``--mqtt-config``) -> explicit config file -> ``mqtt_set`` overrides.
+    Used to expand ``${key}`` placeholders in ``mqtt_send`` envelopes.
+    """
+    cfg: dict[str, Any] = {}
+    if mqtt.config_path:
+        config_file = Path(mqtt.config_path)
+        if not config_file.is_file():
+            raise MqttControlError(f"mqtt config not found: {config_file}")
+        try:
+            cfg = json.loads(config_file.read_text(encoding="utf-8-sig"))
+        except json.JSONDecodeError as exc:
+            raise MqttControlError(
+                f"mqtt config invalid JSON: {config_file} ({exc})"
+            ) from exc
+        if not isinstance(cfg, dict):
+            raise MqttControlError(f"mqtt config must be a JSON object: {config_file}")
+    else:
+        fallback = Path(mqtt.app_path).resolve().parent / "config" / "config.json"
+        if fallback.is_file():
+            try:
+                loaded = json.loads(fallback.read_text(encoding="utf-8-sig"))
+                if isinstance(loaded, dict):
+                    cfg = loaded
+            except json.JSONDecodeError:
+                pass
+    cfg = {**cfg, **mqtt.config_overrides}
+    return cfg
+
+
+_MQTT_VAR_RE = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
+
+
+def mqtt_expand_vars(text: str, cfg: dict[str, Any], row_num: int) -> str:
+    """Expand ``${key}`` placeholders in a mqtt_send value from the effective config."""
+
+    def _replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key not in cfg:
+            raise CsvParseError(
+                f"row {row_num}: mqtt placeholder ${{{key}}} has no value in config"
+            )
+        value = cfg[key]
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
+
+    return _MQTT_VAR_RE.sub(_replace, text)
+
+
+def mqtt_shutdown(mqtt: MqttContext) -> None:
+    """Gracefully stop the mqtt daemon; kill as a fallback."""
+    proc = mqtt.proc
+    if proc is None:
+        return
+    if proc.poll() is None:
+        try:
+            mqtt_command(mqtt, "shutdown", timeout_s=min(mqtt.stop_timeout, 10.0))
+        except MqttControlError as exc:
+            logging.getLogger(LOG_LOGGER_NAME).warning(
+                "Graceful mqtt shutdown failed: %s", exc
+            )
+        try:
+            proc.wait(timeout=mqtt.stop_timeout)
+        except subprocess.TimeoutExpired:
+            mqtt_kill(mqtt)
+    mqtt.proc = None
+    mqtt.started = False
+    mqtt.connected = False
+
+
+def mqtt_kill(mqtt: MqttContext) -> None:
+    proc = mqtt.proc
+    if proc is None:
+        return
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    mqtt.proc = None
+    mqtt.started = False
+    mqtt.connected = False
+
+
 def _sim_http_json(sim: SimContext, method: str, path: str, body: dict | None = None) -> Any:
     url = sim.api_base.rstrip("/") + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -1497,6 +1997,8 @@ def requires_serial(step: Step) -> bool:
     if step.func in SIM_FUNCS:
         return False
     if step.func in SLAVE_FUNCS:
+        return False
+    if step.func in MQTT_FUNCS:
         return False
     if step.func == FUNC_DELAY:
         return step.addr != 0
@@ -2039,6 +2541,162 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
         )
         return StepResult(index, step.func, "FAIL", summary, detail)
 
+    if step.func == FUNC_MQTT_SET:
+        overrides = _parse_mqtt_set_value(step.value, step.row_num)
+        summary = "mqtt_set " + ";".join(f"{k}={v}" for k, v in overrides.items())
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.mqtt is None:
+            return StepResult(
+                index, step.func, "FAIL", summary, "mqtt not configured (--mqtt-app)"
+            )
+        if ctx.mqtt.connected:
+            return StepResult(
+                index,
+                step.func,
+                "FAIL",
+                summary,
+                "mqtt_set must precede mqtt_start or follow mqtt_stop",
+            )
+        ctx.mqtt.config_overrides.update(overrides)
+        return StepResult(index, step.func, "PASS", summary)
+
+    if step.func == FUNC_MQTT_START:
+        summary = "mqtt_start"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.mqtt is None:
+            return StepResult(
+                index, step.func, "FAIL", summary, "mqtt not configured (--mqtt-app)"
+            )
+        if ctx.mqtt.started:
+            return StepResult(index, step.func, "FAIL", summary, "mqtt already started")
+        try:
+            mqtt_spawn(ctx.mqtt)
+            mqtt_wait_ready(ctx.mqtt)
+            ctx.mqtt.started = True
+            response = mqtt_connect(ctx.mqtt)
+            ctx.mqtt.connected = True
+            detail = str((response.get("data") or {}).get("detail", ""))
+            return StepResult(index, step.func, "PASS", summary, detail)
+        except MqttControlError as exc:
+            mqtt_kill(ctx.mqtt)
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_MQTT_STOP:
+        summary = "mqtt_stop"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.mqtt is None or not ctx.mqtt.started:
+            return StepResult(index, step.func, "FAIL", summary, "mqtt not started")
+        proc = ctx.mqtt.proc
+        try:
+            mqtt_shutdown(ctx.mqtt)
+            exit_code = proc.poll() if proc is not None else None
+            return StepResult(index, step.func, "PASS", summary, f"exit={exit_code}")
+        except MqttControlError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_MQTT_SEND:
+        value_text = step.value
+        if not ctx.dry_run and ctx.mqtt is not None:
+            try:
+                cfg = mqtt_effective_config(ctx.mqtt)
+                value_text = mqtt_expand_vars(step.value, cfg, step.row_num)
+            except (MqttControlError, CsvParseError) as exc:
+                return StepResult(index, step.func, "FAIL", "mqtt_send", str(exc))
+        envelope, expect, timeout = _parse_mqtt_send_value(value_text, step.row_num)
+        method = envelope.get("method", "")
+        req_id = envelope.get("id")
+        summary = f"mqtt_send {method} id={req_id}"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.mqtt is None or not ctx.mqtt.connected:
+            return StepResult(
+                index, step.func, "FAIL", summary, "mqtt not connected (run mqtt_start first)"
+            )
+        params: dict[str, Any] = {"envelope": envelope}
+        if expect is not None:
+            params["expect"] = expect
+        if timeout is not None:
+            params["timeout"] = timeout
+        try:
+            send_timeout = float(params.get("timeout", 10.0)) if "timeout" in params else 10.0
+            response = mqtt_command(
+                ctx.mqtt, "send", timeout_s=send_timeout + 5.0, **params
+            )
+            data = response.get("data") or {}
+            if data.get("no_ack"):
+                return StepResult(
+                    index, step.func, "PASS", summary, "no ack (fire-and-forget)"
+                )
+            return StepResult(
+                index, step.func, "PASS", summary, f"code={data.get('code')}"
+            )
+        except MqttControlError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_MQTT_WAIT:
+        method, rid, code, timeout = _parse_mqtt_wait_value(step.value, step.row_num)
+        criteria = []
+        if method is not None:
+            criteria.append(f"method={method}")
+        if rid is not None:
+            criteria.append(f"id={rid}")
+        if code is not None:
+            criteria.append(f"code={code}")
+        summary = "mqtt_wait " + " ".join(criteria)
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.mqtt is None or not ctx.mqtt.connected:
+            return StepResult(
+                index, step.func, "FAIL", summary, "mqtt not connected (run mqtt_start first)"
+            )
+        params: dict[str, Any] = {}
+        if method is not None:
+            params["method"] = method
+        if rid is not None:
+            params["filter_id"] = rid
+        if code is not None:
+            params["code"] = code
+        if timeout > 0:
+            params["timeout"] = timeout
+        try:
+            wait_timeout = float(params.get("timeout", 10.0)) if "timeout" in params else 10.0
+            response = mqtt_command(
+                ctx.mqtt, "wait", timeout_s=wait_timeout + 5.0, **params
+            )
+            data = response.get("data") or {}
+            detail = (
+                f"{data.get('topic', '')} method={data.get('method')} "
+                f"id={data.get('id')} code={data.get('code')}"
+            )
+            return StepResult(index, step.func, "PASS", summary, detail)
+        except MqttControlError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
+    if step.func == FUNC_MQTT_WATCH:
+        seconds = _parse_mqtt_watch_value(step.value, step.row_num)
+        if seconds <= 0:
+            seconds = 30.0
+        summary = f"mqtt_watch {format_seconds(seconds)}s"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.mqtt is None or not ctx.mqtt.connected:
+            return StepResult(
+                index, step.func, "FAIL", summary, "mqtt not connected (run mqtt_start first)"
+            )
+        try:
+            response = mqtt_command(
+                ctx.mqtt, "watch", timeout_s=seconds + 5.0, seconds=seconds
+            )
+            data = response.get("data") or {}
+            return StepResult(
+                index, step.func, "PASS", summary, f"received={data.get('count')}"
+            )
+        except MqttControlError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
     if step.func == FUNC_READ_START_TIME:
         summary = f"read_start_time {ctx.time_addr}"
         if ctx.dry_run:
@@ -2085,6 +2743,9 @@ def run_file(
                     result.duration_s)
         if result.status == "PASS":
             passed += 1
+            # 有 PASS 则重计时：滑动窗口 60s
+            if ctx.session_deadline is not None:
+                ctx.session_deadline = time.monotonic() + ctx.session_timeout
             continue
 
         status = "fail"
@@ -2200,6 +2861,9 @@ def main() -> int:
     session_has_slave_steps = any(
         has_slave_steps(prepared.steps or []) for prepared in valid_files
     )
+    session_has_mqtt_steps = any(
+        has_mqtt_steps(prepared.steps or []) for prepared in valid_files
+    )
 
     if session_has_sim_steps and not args.sim_api and not args.dry_run:
         logger.error("CSV contains sim_* operations but --sim-api is not set")
@@ -2229,6 +2893,34 @@ def main() -> int:
             logger.error("Slave app not found: %s", args.slave_app)
             print(f"ERROR: slave app not found: {args.slave_app}", file=sys.stderr)
             return 2
+
+    if session_has_mqtt_steps and not args.mqtt_app and not args.dry_run:
+        bundled = default_mqtt_app_path()
+        if bundled.is_file():
+            args.mqtt_app = str(bundled)
+            logger.info("Using bundled EMS MQTT master: %s", args.mqtt_app)
+        else:
+            logger.error(
+                "CSV contains mqtt_* operations but --mqtt-app is not set "
+                "and bundled mqtt app not found at %s",
+                bundled,
+            )
+            print(
+                f"ERROR: CSV contains mqtt_* operations but --mqtt-app is not set; "
+                f"no bundled mqtt app at {bundled}",
+                file=sys.stderr,
+            )
+            return 2
+
+    if args.mqtt_app and session_has_mqtt_steps and not args.dry_run:
+        if not Path(args.mqtt_app).is_file():
+            logger.error("MQTT app not found: %s", args.mqtt_app)
+            print(f"ERROR: mqtt app not found: {args.mqtt_app}", file=sys.stderr)
+            return 2
+    if args.mqtt_config and not Path(args.mqtt_config).is_file():
+        logger.error("MQTT config not found: %s", args.mqtt_config)
+        print(f"ERROR: mqtt config not found: {args.mqtt_config}", file=sys.stderr)
+        return 2
 
     sim_ctx: SimContext | None = None
     sim_unavailable = False
@@ -2291,6 +2983,15 @@ def main() -> int:
             stop_timeout=args.slave_stop_timeout,
         )
 
+    mqtt_ctx: MqttContext | None = None
+    if session_has_mqtt_steps and not args.dry_run and args.mqtt_app:
+        mqtt_ctx = MqttContext(
+            app_path=args.mqtt_app,
+            config_path=args.mqtt_config,
+            connect_timeout=args.mqtt_connect_timeout,
+            stop_timeout=args.mqtt_stop_timeout,
+        )
+
     ctx = ExecutionContext(
         client=client,
         slave_id=args.slave_id,
@@ -2298,10 +2999,12 @@ def main() -> int:
         wait_timeout=args.wait_timeout,
         wait_interval=args.wait_interval,
         session_deadline=session_deadline,
+        session_timeout=args.session_timeout,
         dry_run=args.dry_run,
         time_addr=args.time_addr,
         sim=sim_ctx,
         slave=slave_ctx,
+        mqtt=mqtt_ctx,
     )
 
     results: list[FileResult] = []
@@ -2317,7 +3020,7 @@ def main() -> int:
                     "skip",
                     "DeviceSimulator unavailable",
                 )
-            elif time.monotonic() >= session_deadline:
+            elif ctx.session_deadline is not None and time.monotonic() >= ctx.session_deadline:
                 result = make_file_result(prepared, "skip", "session timeout")
             else:
                 result = run_file(
@@ -2334,6 +3037,9 @@ def main() -> int:
         if slave_ctx is not None and slave_ctx.started and slave_ctx.proc is not None:
             logger.warning("Slave still running at session end; force stopping")
             slave_kill(slave_ctx)
+        if mqtt_ctx is not None and mqtt_ctx.started and mqtt_ctx.proc is not None:
+            logger.warning("MQTT daemon still running at session end; force stopping")
+            mqtt_kill(mqtt_ctx)
 
     print_errors(results)
 

@@ -1,0 +1,268 @@
+{
+  "methods": [
+    "sync_workflow_config",
+    "execute_workflow",
+    "set_properties",
+    "get_properties",
+    "ota_start",
+    "start_debug",
+    "stop_debug",
+    "time",
+    "sync_weather"
+  ],
+  "method_cn": {
+    "sync_workflow_config": "同步工作流配置",
+    "execute_workflow": "立即执行工作流",
+    "set_properties": "设置属性",
+    "get_properties": "读取属性",
+    "ota_start": "开始 OTA",
+    "start_debug": "开始调试",
+    "stop_debug": "停止调试",
+    "time": "时间同步",
+    "sync_weather": "同步天气/环境信息",
+    "home_info": "家庭信息",
+    "information": "设备信息",
+    "upload_energy": "上传电能",
+    "properties_changed": "属性变更上报",
+    "result": "属性读写结果"
+  },
+  "row_methods": ["set_properties", "get_properties"],
+  "method_hints": {
+    "sync_workflow_config": "「同步工作流配置」：标量字段 + 触发器（含 manual）/节点/动作/条件网关全量表单（schema v2）；op=delete 仅四字段。manual 工作流需另用 execute_workflow 立即执行",
+    "execute_workflow": "「立即执行」：对已配置且 enabled 的 manual 工作流入队。code=0 表示已入队（含 duplicate），不是节点已跑完；只用 0/1，不复用 sync 的 2–21",
+    "time": "「时间同步」：同步家庭当地墙上时间。timestamp 缺失或落后于当前时间时发送前自动刷新为当前时间（ESP32 会拒绝比上次成功更旧的 timestamp）。不返回 ack，结果以设备日志/上行确认",
+    "sync_weather": "「同步天气/环境信息」：home_id 不变时 observed_at 须单调递增，否则设备返回 STALE 拒绝；时间字段发送前自动刷新。tz/iana/timezone/timeStr 由偏移量自动生成并保持与固件校验一致。不返回 ack"
+  },
+  "prop_row_defaults": {
+    "siid": 2,
+    "piid": 1,
+    "value": "1.0"
+  },
+  "param_fields": {
+    "sync_workflow_config": [
+      {
+        "key": "schema_version",
+        "label": "schema_version (固定为 2)",
+        "kind": "int",
+        "default": 2,
+        "min": 2,
+        "max": 2
+      },
+      {
+        "key": "op",
+        "label": "op (upsert=创建/更新, delete=删除)",
+        "kind": "select",
+        "options": ["upsert", "delete"],
+        "default": "upsert"
+      },
+      {
+        "key": "flow_id",
+        "label": "工作流 ID (0-255)",
+        "kind": "int",
+        "default": 1,
+        "min": 0,
+        "max": 255
+      },
+      {
+        "key": "revision",
+        "label": "版本号 (单调递增)",
+        "kind": "int",
+        "default": 1,
+        "min": 1,
+        "max": 2147483647
+      },
+      {
+        "key": "enabled",
+        "label": "是否启用 (true/false)",
+        "kind": "json",
+        "default": "true"
+      },
+      {
+        "key": "name",
+        "label": "名称 (可选，仅可读性)",
+        "kind": "str",
+        "default": "",
+        "optional": true
+      },
+      {
+        "key": "description",
+        "label": "描述 (可选，仅可读性)",
+        "kind": "str",
+        "default": "",
+        "optional": true
+      }
+    ],
+    "execute_workflow": [
+      {
+        "key": "flow_id",
+        "label": "工作流 ID (0-255，须已存在)",
+        "kind": "int",
+        "default": 1,
+        "min": 0,
+        "max": 255
+      },
+      {
+        "key": "revision",
+        "label": "版本号 (须与设备已存储精确匹配)",
+        "kind": "int",
+        "default": 1,
+        "min": 1,
+        "max": 2147483647
+      },
+      {
+        "key": "run_id",
+        "label": "run_id (UTF-8 1-64 字节，ACK 原样回传)",
+        "kind": "str",
+        "default": "run-1"
+      },
+      {
+        "key": "triggered_by",
+        "label": "triggered_by (UTF-8 ≤64 字节，仅 ESP32 校验)",
+        "kind": "str",
+        "default": "mqtt-gui"
+      }
+    ],
+    "ota_start": [
+      {
+        "key": "firmware_type",
+        "label": "固件类型 (0=ESP32, 1=GD32, 4=热泵T1)",
+        "kind": "int",
+        "default": 0,
+        "min": 0,
+        "max": 15
+      },
+      {
+        "key": "firmware_version",
+        "label": "固件版本",
+        "kind": "str",
+        "default": "v1.0.0"
+      },
+      {
+        "key": "file_length",
+        "label": "固件长度(字节)",
+        "kind": "int",
+        "default": 0,
+        "min": 0,
+        "max": 2147483647
+      },
+      {
+        "key": "md5",
+        "label": "固件 MD5",
+        "kind": "str",
+        "default": ""
+      }
+    ],
+    "start_debug": [],
+    "stop_debug": [],
+    "time": [
+      {
+        "key": "timestamp",
+        "label": "timestamp (Unix 秒，发送前自动刷新为当前时间)",
+        "kind": "int",
+        "default": 0,
+        "min": 0,
+        "max": 2147483647,
+        "optional": true
+      },
+      {
+        "key": "timezone_offset_seconds",
+        "label": "时区偏移（秒，默认 +28800=Asia/Shanghai）",
+        "kind": "int",
+        "default": 28800,
+        "min": -50400,
+        "max": 50400
+      },
+      {
+        "key": "timezone_id",
+        "label": "timezone_id (IANA，如 Asia/Shanghai)",
+        "kind": "str",
+        "default": "Asia/Shanghai"
+      },
+      {
+        "key": "isDaylightSavingTime",
+        "label": "是否夏令时 (true/false)",
+        "kind": "select",
+        "options": [
+          "false",
+          "true"
+        ],
+        "default": "false"
+      },
+      {
+        "key": "timeStr",
+        "label": "本地时间字符串 YYYY-MM-DD HH:MM:SS (发送前自动重算)",
+        "kind": "str",
+        "default": "",
+        "optional": true
+      }
+    ],
+    "sync_weather": [
+      {
+        "key": "home_id",
+        "label": "home_id (家庭标识，需与设备一致)",
+        "kind": "str",
+        "default": ""
+      },
+      {
+        "key": "temperature",
+        "label": "温度 ℃（空=不生效）",
+        "kind": "float",
+        "default": 20,
+        "min": -100,
+        "max": 100,
+        "optional": true
+      },
+      {
+        "key": "humidity",
+        "label": "湿度 %RH（空=不生效）",
+        "kind": "float",
+        "default": 60,
+        "min": 0,
+        "max": 100,
+        "optional": true
+      },
+      {
+        "key": "pm25",
+        "label": "PM2.5 µg/m³（空=不生效）",
+        "kind": "float",
+        "default": 20,
+        "min": 0,
+        "max": 10000,
+        "optional": true
+      },
+      {
+        "key": "observed_at",
+        "label": "观测时间 Unix 秒 (发送前自动刷新)",
+        "kind": "int",
+        "default": 0,
+        "min": 0,
+        "max": 2147483647,
+        "optional": true
+      },
+      {
+        "key": "timezone_offset_seconds",
+        "label": "时区偏移（秒，默认 +28800=Asia/Shanghai）",
+        "kind": "int",
+        "default": 28800,
+        "min": -50400,
+        "max": 50400
+      },
+      {
+        "key": "timezone_id",
+        "label": "timezone_id (IANA，须与 iana 一致)",
+        "kind": "str",
+        "default": "Asia/Shanghai"
+      },
+      {
+        "key": "isDaylightSavingTime",
+        "label": "是否夏令时 (true/false)",
+        "kind": "select",
+        "options": [
+          "false",
+          "true"
+        ],
+        "default": "false"
+      }
+    ]
+  }
+}

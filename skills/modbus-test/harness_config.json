@@ -1,0 +1,33 @@
+{
+  "_comment": "硬件连线端口配置，一次配置后联调自动读取，无需每次指定 --port；MQTT 凭证不在此保存，始终通过 --mqtt-config 指向 hp-ctrl-box-gd32/tests/integration_test/mqtt_test/broker_config.json",
+  "version": 1,
+  "serial": {
+    "port": "COM10",
+    "baudrate": 115200,
+    "slave_id": 1,
+    "time_addr": 60100,
+    "description": "COM10 (CH344 USB-Enhanced-SERIAL-C) 连接 EMS 调试端口；若换线改此字段即可",
+    "available_ports": [
+      {
+        "port": "COM8",
+        "desc": "USB-Enhanced-SERIAL-A CH344 (COM8)"
+      },
+      {
+        "port": "COM9",
+        "desc": "USB-Enhanced-SERIAL-B CH344 (COM9)"
+      },
+      {
+        "port": "COM10",
+        "desc": "USB-Enhanced-SERIAL-C CH344 (COM10)"
+      },
+      {
+        "port": "COM7",
+        "desc": "USB-Enhanced-SERIAL-D CH344 (COM7)"
+      },
+      {
+        "port": "COM6",
+        "desc": "USB 设备 (COM6)"
+      }
+    ]
+  }
+}

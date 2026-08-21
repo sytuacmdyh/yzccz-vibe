@@ -1,0 +1,19 @@
+{
+  "host": "wss://your-broker.example.com",
+  "port": 443,
+  "path": "/mqtt",
+  "username": "",
+  "password": "",
+  "device_id": "",
+  "product_id": "",
+  "timeout": 25,
+  "subscribe_all": false,
+  "qos": 1,
+  "connect_timeout": 15,
+  "expect_ack_code": 0,
+  "watch_seconds": 30,
+  "log_max_blocks": 2000,
+  "msg_max_blocks": 2000,
+  "method": "sync_workflow_config",
+  "request_id": 1001
+}

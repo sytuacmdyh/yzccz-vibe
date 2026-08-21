@@ -1,0 +1,71 @@
+{
+  "手动工作流 upsert": {
+    "id": 20000,
+    "method": "sync_workflow_config",
+    "params": {
+      "schema_version": 2,
+      "op": "upsert",
+      "flow_id": 1,
+      "revision": 1,
+      "enabled": true,
+            "name": "manual-demo",
+            "description": "manual 触发，周期扫描不执行。下发前请把 write target 的 product_id / device_ids 改成连接设置中的值，然后用 execute_workflow 立即入队",
+      "trigger": {
+        "type": "manual"
+      },
+      "nodes": [
+        {
+          "type": "service",
+          "actions": [
+            {
+              "op": "write",
+              "target": {
+                "device_ids": [],
+                "product_id": "",
+                "siid": 2,
+                "piid": 1
+              },
+              "value": {
+                "type": "bool",
+                "value": true
+              }
+            }
+          ],
+          "next": "end"
+        }
+      ]
+    }
+  },
+  "立即执行 execute_workflow": {
+    "id": 20001,
+    "method": "execute_workflow",
+    "params": {
+      "flow_id": 1,
+      "revision": 1,
+      "run_id": "run-1",
+      "triggered_by": "mqtt-gui"
+    }
+  },
+  "时间同步 time（自动）": {
+    "id": 20002,
+    "method": "time",
+    "params": {
+      "timezone_offset_seconds": 28800,
+      "timezone_id": "Asia/Shanghai",
+      "isDaylightSavingTime": false
+    }
+  },
+  "同步天气 sync_weather（自动）": {
+    "id": 20003,
+    "method": "sync_weather",
+    "params": {
+      "home_id": "",
+      "temperature": 20,
+      "humidity": 60,
+      "pm25": 20,
+      "timezone_offset_seconds": 28800,
+      "timezone_id": "Asia/Shanghai",
+      "isDaylightSavingTime": false
+    }
+  }
+}
