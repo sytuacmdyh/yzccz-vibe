@@ -1,0 +1,81 @@
+# ── 运行时配置（首次启动从 *.template.json 自动生成，勿提交）─────────────
+config.json
+methods.json
+codes.json
+presets.json
+last_params.json
+config.local.json
+config.*.local.json
+*.local.json
+auth.json
+credentials.json
+secrets.json
+*.secret.json
+*.secrets.json
+*.credentials.json
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+
+# CLI/GUI 导入导出的业务 JSON（可能含设备 ID、工作流内容）
+env.json
+workflow.json
+*.workflow.json
+payload.json
+*.payload.json
+*.export.json
+presets.import.json
+
+# 运行日志（可能含 MQTT 报文与 ack）
+*.log
+logs/
+
+# ── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# ── 测试 / 工具缓存 ───────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ── IDE / 系统 ──────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 临时文件 ────────────────────────────────────────────────────────────
+*.tmp
+*.bak
+~$*

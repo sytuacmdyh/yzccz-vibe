@@ -1,13 +1,13 @@
 ---
 name: yzc-modbus-test
-description: Run CSV-driven Modbus serial tests and DeviceSimulator control. Supports directory mode or an ordered list of files. Triggers when user mentions modbus test, serial test, integration test, CSV test, simulator test, sim test, or wants to verify register behavior via serial port or simulator.
+description: Run CSV-driven Modbus serial tests and DeviceSimulator control. Supports directory mode or an ordered list of files. Triggers when user mentions modbus test, serial test, integration test, CSV test, simulator test, sim test, or wants to verify register behavior via serial port or simulator. Also drives EMS MQTT message workflows (mqtt_start/mqtt_send/mqtt_wait/mqtt_watch/mqtt_set) via the bundled EMS MQTT master for debugging.
 metadata:
-  short-description: Modbus CSV serial test runner with DeviceSimulator support
+  short-description: Modbus CSV serial test runner with DeviceSimulator and EMS MQTT support
 ---
 
 # Modbus Test Skill
 
-Run CSV-driven Modbus serial tests against a target device via USB/serial port, with optional DeviceSimulator remote control.
+Run CSV-driven Modbus serial tests against a target device via USB/serial port, with optional DeviceSimulator remote control and EMS MQTT message automation.
 
 ## When to Use
 
@@ -15,7 +15,8 @@ Run CSV-driven Modbus serial tests against a target device via USB/serial port, 
 - User mentions "modbus test", "serial test", "integration test", "CSV test", "simulator test", "sim test"
 - User wants to verify register behavior via serial communication
 - User wants to control DeviceSimulator (power on/off, set properties, wait for state changes)
-- User provides a CSV test file and asks to run it against a device or simulator
+- User wants to send or verify EMS MQTT messages (sync commands, time sync, workflow config) as part of a test or debugging session
+- User provides a CSV test file and asks to run it against a device, simulator, or MQTT broker
 
 ## Parameters
 
@@ -39,13 +40,17 @@ The user may provide:
 - **--slave-respond-1-40**: Make the child respond to Modbus slave ID 1..40 (group control bench)
 - **--slave-ready-timeout**: Seconds to wait for the slave ready event (default: 10.0)
 - **--slave-stop-timeout**: Seconds to wait for graceful slave shutdown before kill (default: 5.0)
+- **--mqtt-app**: Override path to the EMS MQTT master `app_cli.py` (default: the `ems_mqtt_master/app_cli.py` bundled with this skill, auto-detected; only needed to point elsewhere)
+- **--mqtt-config**: Path to a broker config JSON to use instead of the bundled `config/config.json` (generated from `config.template.json` on first run; optional)
+- **--mqtt-connect-timeout**: Seconds to wait for the MQTT broker connection (default: 15.0)
+- **--mqtt-stop-timeout**: Seconds to wait for graceful MQTT daemon shutdown before kill (default: 5.0)
 - **--log-dir**: Directory for log files (default: `./logs`)
 - **--no-log**: Disable file logging
 
 ## Execution Steps
 
 1. **Determine inputs**: Use either one directory or an explicit list of CSV files. Preserve the user's order for a file list. In directory mode, scan the top level by default and add `--recursive` only when requested.
-2. **Detect port**: If `--port` not specified, auto-detect serial port. If multiple ports found, list them and ask user to specify. **Note**: Serial connection is skipped when CSV only contains `sim_*`, `slave_*` and `delay(0)` operations.
+2. **Detect port**: If `--port` not specified, auto-detect serial port. If multiple ports found, list them and ask user to specify. **Note**: Serial connection is skipped when CSV only contains `sim_*`, `slave_*`, `mqtt_*` and `delay(0)` operations.
 3. **Locate bundled script**: Resolve `SKILL_ROOT` before building the command. Check these directories in order and use the first one that contains `scripts/modbus_test.py`:
    - `$PWD/.agents/skills/yzc-modbus-test` for a project-level `npx skills` install
    - `$HOME/.agents/skills/yzc-modbus-test` for a global `npx skills` install
@@ -64,6 +69,13 @@ The user may provide:
    Add `--dry-run`, `--time-addr`, or other supported connection/time options if requested.
    Add `--sim-api http://127.0.0.1:9090` when CSV contains `sim_*` operations.
    No `--slave-app` needed: the EMS Modbus Slave ships with this skill at `$SKILL_ROOT/ems_modbus_slave/app.py` and is auto-detected. Only pass `--slave-app <path>` (plus `--slave-port`, `--slave-preset`, etc. as needed) when a CSV contains `slave_*` operations and a different slave copy is wanted.
+   When a CSV contains `mqtt_*` operations, the `ems_mqtt_master` daemon (which depends on `paho-mqtt`, `PySide6`, `websocket-client`) is spawned. Add these to the `uv run --with` list so the daemon can import them:
+   ```bash
+   uv run --with "pymodbus>=3.0,<4.0" --with "pyserial>=3.5,<4.0" \
+     --with "paho-mqtt" --with "PySide6" --with "websocket-client" \
+     "$SKILL_ROOT/scripts/modbus_test.py" <file.csv> --mqtt-config <broker-config.json>
+   ```
+   No `--mqtt-app` needed: the EMS MQTT master ships with this skill at `$SKILL_ROOT/ems_mqtt_master/app_cli.py` and is auto-detected. Only pass `--mqtt-app <path>` (plus `--mqtt-config` as needed) when a CSV contains `mqtt_*` operations and a different master copy is wanted.
    Add `--log-dir <path>` to customize log output directory. Add `--no-log` to disable file logging.
 5. **Show command**: Display the full command before execution.
 6. **Execute**: Run the command. Default timeout: 120s for the entire session. When specifying `--session-timeout`, reserve enough margin based on test case count and content (e.g., `delay`/`wait` durations, write retry overhead).
@@ -119,6 +131,12 @@ read,4250,350,Verify target temp
 | `slave_write` | Write slave register(s) via the stdio control channel; address=DeviceIndex(>0), value=`addr:value[;addr:value][;slave_id=N]` (register injection bypasses writable restrictions) |
 | `slave_read` | Read slave register and compare; address=DeviceIndex(>0), value=`addr:expected[;slave_id=N]` (exact/range/bit) |
 | `slave_wait` | Poll slave register until match or timeout; address=DeviceIndex(>0), value=`addr:expected[;timeout=N][;interval=M][;slave_id=N]` |
+| `mqtt_start` | Start the EMS MQTT master daemon and connect to the broker; address=0; waits for the ready event |
+| `mqtt_stop` | Disconnect from the broker and stop the MQTT daemon; address=0 |
+| `mqtt_send` | Send one MQTT request envelope and await its ack; address=0, value=JSON envelope, optional trailing `;expect=N;timeout=M` |
+| `mqtt_wait` | Wait for an incoming MQTT message matching method/id/code; address=0, value=`method=X[;id=N][;code=N][;timeout=M]` |
+| `mqtt_watch` | Record incoming MQTT messages for N seconds and report how many were received; address=0, value=seconds |
+| `mqtt_set` | Override broker config keys for the session (applies to the next `mqtt_start`); address=0, value=`key=value;key=value` |
 | `sim_power` | Power on/off device via DeviceSimulator API (controls LAN UDP connection); address=DeviceIndex(>0) |
 | `sim_control` | Set device property via DeviceSimulator API; address=DeviceIndex(>0), value=`property:value` |
 | `sim_read` | Read device hardware snapshot and compare; address=DeviceIndex(>0), value=`property:expected` |
@@ -194,6 +212,35 @@ Value format for `sim_wait`: `property:expected[;timeout=N][;interval=M]`
 
 **Note**: `--wait-timeout` has dual meaning: poll attempts for Modbus `wait`, seconds for `sim_wait`.
 
+### EMS MQTT Master Operations
+
+`mqtt_*` operations spawn the EMS MQTT master (`ems_mqtt_master/app_cli.py`, a bundled copy of the `mqtt_workflow_gui` program from the EMS_Mqtt_Test repo) as a stdio daemon child process and talk to it over a JSON-RPC channel. One daemon holds a single broker connection for the whole session; `mqtt_start`/`mqtt_stop` manage its lifecycle. `mqtt_set` accumulates per-session config overrides that are applied on the next `mqtt_start`. MQTT steps do not need a serial port.
+
+```csv
+function,address,value,description
+mqtt_set,0,"host=wss://mqtt.example.com;product_id=prod_a;subscribe_all=true",Point at broker
+mqtt_start,0,,Connect to broker
+mqtt_send,0,"{""id"":1,""method"":""sync_weather"",""params"":{}};expect=0;timeout=15",Sync weather and expect ack code 0
+mqtt_wait,0,"method=sync_weather;id=1;code=0;timeout=15",Wait for the ack response
+mqtt_watch,0,10,Collect inbound messages for 10s
+mqtt_stop,0,,Disconnect
+```
+
+Value formats:
+
+- **`mqtt_send`**: JSON request envelope (must contain `method`; typically also `id`). Optional trailing `;expect=N` (expected ack code, FAIL if different) and `;timeout=M` (seconds to wait for the ack). The parser splits from the right, so semicolons inside the JSON string are fine. The envelope supports `{host}`, `{port}`, `{product_id}`, `{device_id}`, `{username}`, `{password}`, `{client_id}` style placeholders (syntax `${key}`) that are expanded from the effective broker config (`--mqtt-config` + `mqtt_set` overrides) at run time — e.g. the workflow write target can use `"product_id":"${product_id}"` instead of hardcoding credentials.
+- **`mqtt_wait`**: `method=X` and/or `id=N` and/or `code=N` (at least one required), plus optional `;timeout=M` (defaults to `--wait-timeout`). Matches the next incoming message satisfying all criteria.
+- **`mqtt_watch`**: seconds to record inbound messages; `0`/empty means watch the whole remaining session time; `received=N` in the detail reports how many messages arrived.
+- **`mqtt_set`**: `key=value` pairs. Recognized keys: `host`, `port`, `client_id`, `product_id`, `device_id`, `username`, `password`, `qos`, `expect_ack_code`, `subscribe_all` (bool), `timeout` (alias `ack_timeout`). Unknown keys are a parse error.
+
+Notes:
+- All `mqtt_*` steps require `address=0`; a non-zero address is a parse error.
+- Config resolution at `mqtt_start`: bundled `config/config.json` (auto-generated from `config.template.json`, credentials are placeholders) → `--mqtt-config <file>` → `mqtt_set` overrides → applied when the daemon connects. Real broker credentials never enter the repo; pass them via `--mqtt-config` or `mqtt_set` at run time. `mqtt_send` envelopes may reference config values as `${key}` placeholders (e.g. `${product_id}`, `${device_id}`); they are expanded from the same effective config before sending.
+- The daemon auto-refreshes time fields for `NO_ACK`/time-sync methods before sending.
+- `--mqtt-app` defaults to the bundled `ems_mqtt_master/app_cli.py` (auto-detected next to the skill); a missing bundle or an invalid explicit path is a setup error (exit code 2). Runtime failures (spawn, connect, timeout) FAIL the current CSV.
+- The daemon is force-killed at session end if `mqtt_stop` was not reached (logged as a warning).
+- The daemon needs `paho-mqtt`, `PySide6`, and `websocket-client` installed (add them to the `uv run --with` list).
+
 ### EMS Modbus Slave Operations
 
 `slave_*` operations launch and drive the EMS Modbus Slave simulator as the heatpump side of the bench. The simulator ships with this skill at `ems_modbus_slave/` (a self-contained copy of `tests/EMS Modbus Slave` from the hp-ctrl-box-gd32 repo: `app.py` + `src/` + `profiles/` + `presets/`; `dist/`, `logs/` and build artifacts are excluded). The script spawns `app.py --cli --stdio-control` as a child process and talks to it over a stdio JSON-RPC channel (no network ports). Set the launch configuration with the `--slave-*` flags; `slave_start`/`slave_stop` manage the lifecycle.
@@ -265,7 +312,7 @@ The register at `--time-addr` (default 4399) is a **uint16 seconds counter** tha
 
 - Read uses FC03, single write uses FC06, multi-register write uses FC16
 - Serial connection shared across entire run (no per-file reconnect)
-- Serial connection is skipped when CSV only contains `sim_*`/`slave_*` and `delay(0)` operations (no serial port needed)
+- Serial connection is skipped when CSV only contains `sim_*`/`slave_*`/`mqtt_*` and `delay(0)` operations (no serial port needed)
 - Device state carries over between files in batch mode
 - Folder scan is non-recursive by default (top-level *.csv only); use `--recursive` to search subdirectories
 - File-list mode preserves argument order and may include the same file more than once

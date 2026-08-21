@@ -398,5 +398,309 @@ class MainFlowTests(unittest.TestCase):
             self.assertIn(f"Log: {log_files[0]}\n", stdout)
 
 
+class MqttParseTests(unittest.TestCase):
+    def test_mqtt_ops_do_not_require_serial(self):
+        for func in sorted(MODULE.MQTT_FUNCS):
+            with self.subTest(func=func):
+                step = MODULE.Step(func, 0, "", "noop", 2)
+                self.assertFalse(MODULE.requires_serial(step))
+
+    def test_mqtt_send_parses_envelope(self):
+        envelope, expect, timeout = MODULE._parse_mqtt_send_value(
+            '{"id":1,"method":"sync_workflow_config","params":{}}', 2
+        )
+        self.assertEqual(envelope["method"], "sync_workflow_config")
+        self.assertIsNone(expect)
+        self.assertIsNone(timeout)
+
+    def test_mqtt_send_parses_options(self):
+        envelope, expect, timeout = MODULE._parse_mqtt_send_value(
+            '{"id":1,"method":"x","params":{}};expect=16;timeout=8.5', 2
+        )
+        self.assertEqual(expect, 16)
+        self.assertEqual(timeout, 8.5)
+
+    def test_mqtt_send_tolerates_semicolon_in_json(self):
+        envelope, expect, timeout = MODULE._parse_mqtt_send_value(
+            '{"id":1,"method":"x","params":{"desc":"a;b"}};expect=0', 2
+        )
+        self.assertEqual(envelope["params"]["desc"], "a;b")
+        self.assertEqual(expect, 0)
+
+    def test_mqtt_send_rejects_non_json(self):
+        for bad in ("not json", '{"id":1,"method":"x","params":{}};expect=abc', ""):
+            with self.subTest(bad=bad):
+                with self.assertRaises(MODULE.CsvParseError):
+                    MODULE._parse_mqtt_send_value(bad, 2)
+
+    def test_mqtt_send_requires_method(self):
+        with self.assertRaises(MODULE.CsvParseError):
+            MODULE._parse_mqtt_send_value('{"id":1}', 2)
+
+    def test_mqtt_expand_vars_substitutes_config_values(self):
+        cfg = {"product_id": "prod_a", "device_id": "dev_b", "subscribe_all": True}
+        raw = '{"id":1,"method":"x","device_ids":["${device_id}"],"product_id":"${product_id}"}'
+        out = MODULE.mqtt_expand_vars(raw, cfg, 2)
+        self.assertIn('"device_ids":["dev_b"]', out)
+        self.assertIn('"product_id":"prod_a"', out)
+
+    def test_mqtt_expand_vars_leaves_unmatched_text(self):
+        cfg = {"product_id": "p1"}
+        out = MODULE.mqtt_expand_vars('{"id":1,"method":"x","params":{"keep":"${product_id}"}}', cfg, 2)
+        self.assertIn('"keep":"p1"', out)
+
+    def test_mqtt_expand_vars_missing_key_raises(self):
+        cfg = {"product_id": "p1"}
+        with self.assertRaises(MODULE.CsvParseError):
+            MODULE.mqtt_expand_vars('{"id":1,"method":"x","params":{"a":"${nope}"}}', cfg, 2)
+
+    def test_mqtt_effective_config_merges_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_file = Path(tmp) / "cfg.json"
+            config_file.write_text(
+                '{"product_id":"base","host":"wss://x"}', encoding="utf-8"
+            )
+            mqtt = MODULE.MqttContext(app_path="app_cli.py", config_path=str(config_file))
+            mqtt.config_overrides.update({"product_id": "overridden", "device_id": "d2"})
+            cfg = MODULE.mqtt_effective_config(mqtt)
+            self.assertEqual(cfg["product_id"], "overridden")
+            self.assertEqual(cfg["host"], "wss://x")
+            self.assertEqual(cfg["device_id"], "d2")
+
+    def test_mqtt_wait_parses_criteria(self):
+        method, rid, code, timeout = MODULE._parse_mqtt_wait_value(
+            "method=sync_weather;id=20003;code=16;timeout=5", 2
+        )
+        self.assertEqual(method, "sync_weather")
+        self.assertEqual(rid, "20003")
+        self.assertEqual(code, 16)
+        self.assertEqual(timeout, 5)
+
+    def test_mqtt_wait_requires_criterion(self):
+        with self.assertRaises(MODULE.CsvParseError):
+            MODULE._parse_mqtt_wait_value("timeout=5", 2)
+
+    def test_mqtt_watch_parses_seconds(self):
+        self.assertEqual(MODULE._parse_mqtt_watch_value("12", 2), 12)
+        self.assertEqual(MODULE._parse_mqtt_watch_value("", 2), 0.0)
+        with self.assertRaises(MODULE.CsvParseError):
+            MODULE._parse_mqtt_watch_value("0", 2)
+
+    def test_mqtt_set_parses_overrides(self):
+        overrides = MODULE._parse_mqtt_set_value(
+            "host=wss://broker.example.com;port=443;product_id=p1;"
+            "device_id=d1;qos=1;subscribe_all=true;expect_ack_code=16",
+            2,
+        )
+        self.assertEqual(overrides["host"], "wss://broker.example.com")
+        self.assertEqual(overrides["port"], 443)
+        self.assertEqual(overrides["product_id"], "p1")
+        self.assertEqual(overrides["device_id"], "d1")
+        self.assertEqual(overrides["qos"], 1)
+        self.assertIs(overrides["subscribe_all"], True)
+        self.assertEqual(overrides["expect_ack_code"], 16)
+
+    def test_mqtt_set_aliases_ack_timeout(self):
+        overrides = MODULE._parse_mqtt_set_value("ack_timeout=30", 2)
+        self.assertEqual(overrides["timeout"], 30)
+
+    def test_mqtt_set_rejects_unknown_and_invalid(self):
+        for bad in ("nope=1", "qos=3", "subscribe_all=maybe", ""):
+            with self.subTest(bad=bad):
+                with self.assertRaises(MODULE.CsvParseError):
+                    MODULE._parse_mqtt_set_value(bad, 2)
+
+    def test_mqtt_ops_require_zero_address(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mqtt.csv"
+            write_csv(
+                path,
+                f"mqtt_send,1,\"{{\\\"id\\\":1,\\\"method\\\":\\\"x\\\",\\\"params\\\":{{}}\}}\",send\n",
+            )
+            with self.assertRaises(MODULE.CsvParseError):
+                MODULE.parse_csv(path, "utf-8-sig")
+
+    def test_mqtt_start_allows_empty_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mqtt.csv"
+            write_csv(path, "mqtt_start,0,,Start session\n")
+            steps = MODULE.parse_csv(path, "utf-8-sig")
+            self.assertEqual(len(steps), 1)
+            self.assertEqual(steps[0].func, MODULE.FUNC_MQTT_START)
+
+
+class MqttExecuteTests(unittest.TestCase):
+    def make_ctx(self, mqtt=None, dry_run=False):
+        return MODULE.ExecutionContext(
+            client=None,
+            slave_id=1,
+            initial_slave_id=1,
+            wait_timeout=10,
+            wait_interval=1.0,
+            session_deadline=None,
+            dry_run=dry_run,
+            mqtt=mqtt,
+        )
+
+    def step(self, func, value, addr=0):
+        return MODULE.Step(func, addr, value, func, 2)
+
+    def test_mqtt_send_pass_with_ack_code(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py", connected=True)
+        ctx = self.make_ctx(mqtt=mqtt)
+        with mock.patch.object(
+            MODULE,
+            "mqtt_command",
+            return_value={"ok": True, "data": {"id": 1, "method": "x", "code": 0}},
+        ):
+            result = MODULE.execute_step(
+                self.step(MODULE.FUNC_MQTT_SEND, '{"id":1,"method":"x","params":{}}'), ctx
+            )
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("code=0", result.detail)
+
+    def test_mqtt_send_fail_on_ack_error(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py", connected=True)
+        ctx = self.make_ctx(mqtt=mqtt)
+        with mock.patch.object(
+            MODULE,
+            "mqtt_command",
+            side_effect=MODULE.MqttControlError("ack code=16 != expect=0"),
+        ):
+            result = MODULE.execute_step(
+                self.step(MODULE.FUNC_MQTT_SEND, '{"id":1,"method":"x","params":{}}'), ctx
+            )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("16", result.detail)
+
+    def test_mqtt_send_requires_connection(self):
+        ctx = self.make_ctx(mqtt=None)
+        result = MODULE.execute_step(
+            self.step(MODULE.FUNC_MQTT_SEND, '{"id":1,"method":"x","params":{}}'), ctx
+        )
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("not connected", result.detail)
+
+    def test_mqtt_send_expands_placeholders_at_execution(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py", connected=True)
+        mqtt.config_overrides.update({"product_id": "p1", "device_id": "d1"})
+        ctx = self.make_ctx(mqtt=mqtt)
+        sent = {}
+
+        def fake_command(mqtt, op, **params):
+            sent["envelope"] = params["envelope"]
+            return {"ok": True, "data": {"id": 1, "method": "x", "code": 0}}
+
+        with mock.patch.object(MODULE, "mqtt_command", side_effect=fake_command):
+            result = MODULE.execute_step(
+                self.step(
+                    MODULE.FUNC_MQTT_SEND,
+                    '{"id":1,"method":"x","device_ids":["${device_id}"],"product_id":"${product_id}"};expect=0',
+                ),
+                ctx,
+            )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(sent["envelope"]["product_id"], "p1")
+        self.assertEqual(sent["envelope"]["device_ids"], ["d1"])
+
+    def test_mqtt_start_connects(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py")
+        ctx = self.make_ctx(mqtt=mqtt)
+        with mock.patch.object(MODULE, "mqtt_spawn"), mock.patch.object(
+            MODULE, "mqtt_wait_ready"
+        ), mock.patch.object(
+            MODULE,
+            "mqtt_connect",
+            return_value={"ok": True, "data": {"detail": "up/p/d"}},
+        ):
+            result = MODULE.execute_step(self.step(MODULE.FUNC_MQTT_START, ""), ctx)
+        self.assertEqual(result.status, "PASS")
+        self.assertTrue(mqtt.started)
+        self.assertTrue(mqtt.connected)
+
+    def test_mqtt_start_fails_on_connect_error(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py")
+        ctx = self.make_ctx(mqtt=mqtt)
+        with mock.patch.object(MODULE, "mqtt_spawn"), mock.patch.object(
+            MODULE, "mqtt_wait_ready"
+        ), mock.patch.object(
+            MODULE, "mqtt_connect", side_effect=MODULE.MqttControlError("connect failed: bad creds")
+        ), mock.patch.object(MODULE, "mqtt_kill"):
+            result = MODULE.execute_step(self.step(MODULE.FUNC_MQTT_START, ""), ctx)
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("bad creds", result.detail)
+
+    def test_mqtt_stop_shuts_down(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py", started=True)
+        fake_proc = mock.Mock(poll=lambda: 0)
+        mqtt.proc = fake_proc
+        ctx = self.make_ctx(mqtt=mqtt)
+        with mock.patch.object(MODULE, "mqtt_shutdown"):
+            result = MODULE.execute_step(self.step(MODULE.FUNC_MQTT_STOP, ""), ctx)
+        self.assertEqual(result.status, "PASS")
+
+    def test_mqtt_set_updates_overrides(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py")
+        ctx = self.make_ctx(mqtt=mqtt)
+        result = MODULE.execute_step(
+            self.step(MODULE.FUNC_MQTT_SET, "host=wss://x;product_id=p1;subscribe_all=true"), ctx
+        )
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(mqtt.config_overrides["host"], "wss://x")
+        self.assertEqual(mqtt.config_overrides["product_id"], "p1")
+        self.assertIs(mqtt.config_overrides["subscribe_all"], True)
+
+    def test_mqtt_set_rejected_when_connected(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py", connected=True)
+        ctx = self.make_ctx(mqtt=mqtt)
+        result = MODULE.execute_step(
+            self.step(MODULE.FUNC_MQTT_SET, "host=wss://x"), ctx
+        )
+        self.assertEqual(result.status, "FAIL")
+
+    def test_mqtt_wait_pass(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py", connected=True)
+        ctx = self.make_ctx(mqtt=mqtt)
+        with mock.patch.object(
+            MODULE,
+            "mqtt_command",
+            return_value={
+                "ok": True,
+                "data": {"topic": "up/p/d", "method": "x", "id": 1, "code": 0},
+            },
+        ):
+            result = MODULE.execute_step(
+                self.step(MODULE.FUNC_MQTT_WAIT, "method=x;id=1;code=0"), ctx
+            )
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("method=x", result.detail)
+
+    def test_mqtt_watch_pass(self):
+        mqtt = MODULE.MqttContext(app_path="app_cli.py", connected=True)
+        ctx = self.make_ctx(mqtt=mqtt)
+        with mock.patch.object(
+            MODULE,
+            "mqtt_command",
+            return_value={"ok": True, "data": {"count": 3}},
+        ):
+            result = MODULE.execute_step(self.step(MODULE.FUNC_MQTT_WATCH, "5"), ctx)
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("received=3", result.detail)
+
+    def test_mqtt_ops_pass_in_dry_run(self):
+        ctx = self.make_ctx(mqtt=None, dry_run=True)
+        for func, value in (
+            (MODULE.FUNC_MQTT_START, ""),
+            (MODULE.FUNC_MQTT_SEND, '{"id":1,"method":"x","params":{}}'),
+            (MODULE.FUNC_MQTT_WAIT, "method=x"),
+            (MODULE.FUNC_MQTT_WATCH, "5"),
+            (MODULE.FUNC_MQTT_SET, "host=wss://x"),
+            (MODULE.FUNC_MQTT_STOP, ""),
+        ):
+            with self.subTest(func=func):
+                result = MODULE.execute_step(self.step(func, value), ctx)
+                self.assertEqual(result.status, "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()
