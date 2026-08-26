@@ -285,6 +285,17 @@ class WaitSpec:
 LOG_LOGGER_NAME = "modbus_test"
 
 
+class _PymodbusRoutineWarningFilter(logging.Filter):
+    """Hide pymodbus's normal stale-byte cleanup chatter."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            message.startswith("Cleanup recv buffer before send:")
+            or message == "Repeating...."
+        )
+
+
 def setup_logging(log_dir: str, no_log: bool) -> Path | None:
     logger = logging.getLogger(LOG_LOGGER_NAME)
     for h in logger.handlers[:]:
@@ -801,6 +812,13 @@ def create_client(port: str, baudrate: int) -> Any:
         raise ConnectionSetupError(
             "pymodbus is not installed in this interpreter; use uv run --with pymodbus --with pyserial"
         ) from exc
+
+    # A stale-byte flush before a request is routine serial housekeeping, not a
+    # test failure. Keep other pymodbus warnings and errors visible.
+    pymodbus_logger = logging.getLogger("pymodbus.logging")
+    if not any(isinstance(item, _PymodbusRoutineWarningFilter)
+               for item in pymodbus_logger.filters):
+        pymodbus_logger.addFilter(_PymodbusRoutineWarningFilter())
 
     return ModbusSerialClient(
         port=port,
