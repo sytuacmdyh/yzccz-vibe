@@ -1,6 +1,10 @@
 # yzccz-vibe
 
-个人 vibe coding 配置仓库，统一管理 Claude Code 和 Codex 的自定义 skills。仓库可直接作为 `npx skills` 的安装源。
+个人 vibe coding 配置仓库，统一管理可复用的 Agent Skills。仓库可直接作为 `npx skills` 的安装源。
+
+## 设计原则
+
+技能说明和工作流保持平台无关，不依赖或指定某个 AI 编程助手。具体的发现、自动触发和显式调用方式由安装技能的宿主决定。
 
 ## 技能列表
 
@@ -36,4 +40,4 @@ npx skills add sytuacmdyh/yzccz-vibe --list
 npx skills add sytuacmdyh/yzccz-vibe -g -s yzc-keil-wsl-build -a '*' -y
 ```
 
-安装后，在 Claude 或 Codex 中可通过 `/yzc-commit`、`/yzc-keil-wsl-build`、`/yzc-modbus-test` 等命令直接调用。
+安装后，可在支持 Agent Skills 的 AI 编程助手中通过自然语言自动匹配，或按宿主提供的方式显式调用 `yzc-commit`、`yzc-keil-wsl-build`、`yzc-modbus-test`。
