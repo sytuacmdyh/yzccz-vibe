@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""Build Keil projects from WSL at the exact current Git commit."""
+"""Build Keil projects from an exact snapshot of a WSL Git worktree."""
 
 from __future__ import annotations
 
@@ -71,10 +71,20 @@ class BuildResult:
         }
 
 
+@dataclass(frozen=True)
+class SourceSnapshot:
+    base_commit: str
+    commit: str
+    tree_hash: str
+    dirty: bool
+    includes_untracked: bool
+
+
 def run(
     args: Sequence[str],
     *,
     cwd: Path | None = None,
+    env: dict[str, str] | None = None,
     timeout: int | None = None,
     check: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
@@ -82,6 +92,7 @@ def run(
         result = subprocess.run(
             list(args),
             cwd=cwd,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
@@ -108,8 +119,13 @@ def quote_command(args: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(arg)) for arg in args)
 
 
-def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
-    return run(["git", "-C", str(repo), *args], check=check)
+def git(
+    repo: Path,
+    *args: str,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    return run(["git", "-C", str(repo), *args], check=check, env=env)
 
 
 def git_text(repo: Path, *args: str) -> str:
@@ -358,14 +374,7 @@ def print_status(status: dict[str, Any], as_json: bool) -> None:
         print(f"Detected candidate for {field}: {candidate}")
 
 
-def require_clean(repo: Path) -> None:
-    status = git(repo, "status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none")
-    if status.stdout.strip():
-        lines = decode_output(status.stdout).strip().splitlines()
-        preview = "\n".join(lines[:20])
-        raise SetupError(
-            "the WSL worktree must be clean so the build represents exactly HEAD:\n" + preview
-        )
+def require_clean_submodules(repo: Path) -> None:
     submodules = git(repo, "submodule", "status", "--recursive", check=False)
     if submodules.returncode == 0:
         bad = [
@@ -375,6 +384,79 @@ def require_clean(repo: Path) -> None:
         ]
         if bad:
             raise SetupError("submodule state does not match HEAD:\n" + "\n".join(bad))
+
+    dirty = git(
+        repo,
+        "submodule",
+        "foreach",
+        "--quiet",
+        "--recursive",
+        'git diff --quiet && git diff --cached --quiet && '
+        'test -z "$(git ls-files --others --exclude-standard)"',
+        check=False,
+    )
+    if dirty.returncode != 0:
+        detail = decode_output(dirty.stderr or dirty.stdout).strip()
+        raise SetupError(
+            "dirty submodules cannot be represented by the superproject snapshot"
+            + (f":\n{detail}" if detail else "")
+        )
+
+
+def prepare_source_snapshot(repo: Path, temporary_dir: Path) -> SourceSnapshot:
+    require_clean_submodules(repo)
+    base_commit = git_text(repo, "rev-parse", "HEAD")
+    status = git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
+        "--ignore-submodules=none",
+    )
+    changes = tuple(decode_output(status.stdout).splitlines())
+    includes_untracked = any(line.startswith("?? ") for line in changes)
+    if not changes:
+        return SourceSnapshot(
+            base_commit=base_commit,
+            commit=base_commit,
+            tree_hash=git_text(repo, "rev-parse", "HEAD^{tree}"),
+            dirty=False,
+            includes_untracked=False,
+        )
+
+    index = temporary_dir / "snapshot.index"
+    snapshot_env = os.environ.copy()
+    snapshot_env.update(
+        {
+            "GIT_INDEX_FILE": str(index),
+            "GIT_AUTHOR_NAME": "YZC Keil Build",
+            "GIT_AUTHOR_EMAIL": "yzc-keil-build@localhost",
+            "GIT_COMMITTER_NAME": "YZC Keil Build",
+            "GIT_COMMITTER_EMAIL": "yzc-keil-build@localhost",
+        }
+    )
+    git(repo, "read-tree", "HEAD", env=snapshot_env)
+    git(repo, "add", "--all", "--", ".", env=snapshot_env)
+    tree = decode_output(git(repo, "write-tree", env=snapshot_env).stdout).strip()
+    commit = decode_output(
+        git(
+            repo,
+            "commit-tree",
+            tree,
+            "-p",
+            base_commit,
+            "-m",
+            "Temporary snapshot for Keil build",
+            env=snapshot_env,
+        ).stdout
+    ).strip()
+    return SourceSnapshot(
+        base_commit=base_commit,
+        commit=commit,
+        tree_hash=tree,
+        dirty=True,
+        includes_untracked=includes_untracked,
+    )
 
 
 def parse_project_targets(path: Path) -> list[str]:
@@ -507,13 +589,24 @@ def order_targets_by_dependencies(
     return ordered
 
 
-def discover_projects(repo: Path) -> list[str]:
-    result = git(repo, "ls-files", "-z", "--", "*.uvprojx")
-    return sorted(
+def discover_projects(repo: Path, treeish: str | None = None) -> list[str]:
+    if treeish is None:
+        result = git(repo, "ls-files", "-z", "--", "*.uvprojx")
+    else:
+        result = git(
+            repo,
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            treeish,
+        )
+    projects = [
         item.decode("utf-8", errors="surrogateescape")
         for item in result.stdout.split(b"\0")
         if item
-    )
+    ]
+    return sorted(project for project in projects if project.endswith(".uvprojx"))
 
 
 def normalize_project_filter(value: str) -> str:
@@ -524,16 +617,19 @@ def normalize_project_filter(value: str) -> str:
 
 
 def select_targets(
-    repo: Path, project_filter: str | None, target_filters: Sequence[str]
+    repo: Path,
+    project_filter: str | None,
+    target_filters: Sequence[str],
+    treeish: str | None = None,
 ) -> list[ProjectTarget]:
-    projects = discover_projects(repo)
+    projects = discover_projects(repo, treeish)
     if project_filter:
         requested = normalize_project_filter(project_filter)
         projects = [project for project in projects if project == requested]
         if not projects:
-            raise SetupError(f"tracked Keil project not found: {requested}")
+            raise SetupError(f"Keil project not found in the build snapshot: {requested}")
     if not projects:
-        raise SetupError("no tracked *.uvprojx files were found")
+        raise SetupError("no *.uvprojx files were found in the build snapshot")
 
     selected: list[ProjectTarget] = []
     available_targets: set[str] = set()
@@ -557,20 +653,31 @@ def windows_commit_exists(windows_repo: str, commit: str) -> bool:
 
 
 def ensure_windows_commit(
-    wsl_repo: Path, windows_repo: str, commit: str, temporary_dir: Path
+    wsl_repo: Path,
+    windows_repo: str,
+    commit: str,
+    temporary_dir: Path,
+    *,
+    prefer_bundle: bool = False,
 ) -> Path | None:
     if windows_commit_exists(windows_repo, commit):
         return None
-    print("Commit is absent from the Windows clone; fetching origin...")
-    windows_git(windows_repo, "fetch", "origin", check=False)
-    if windows_commit_exists(windows_repo, commit):
-        return None
+    if not prefer_bundle:
+        print("Commit is absent from the Windows clone; fetching origin...")
+        windows_git(windows_repo, "fetch", "origin", check=False)
+        if windows_commit_exists(windows_repo, commit):
+            return None
 
     bundle = temporary_dir / "head.bundle"
-    print("Commit is not on origin; transferring HEAD with a temporary Git bundle...")
-    git(wsl_repo, "bundle", "create", str(bundle), "HEAD")
+    temporary_ref = f"refs/yzc-keil-build/{uuid.uuid4().hex}"
+    print("Transferring the build commit with a temporary Git bundle...")
+    git(wsl_repo, "update-ref", temporary_ref, commit)
+    try:
+        git(wsl_repo, "bundle", "create", str(bundle), temporary_ref)
+    finally:
+        git(wsl_repo, "update-ref", "-d", temporary_ref, check=False)
     windows_bundle = wsl_to_windows(bundle)
-    result = windows_git(windows_repo, "fetch", windows_bundle, "HEAD", check=False)
+    result = windows_git(windows_repo, "fetch", windows_bundle, temporary_ref, check=False)
     if result.returncode != 0 or not windows_commit_exists(windows_repo, commit):
         detail = decode_output(result.stderr or result.stdout).strip()
         raise SetupError(f"failed to transfer commit {commit} to Windows Git: {detail}")
@@ -692,11 +799,8 @@ def configured_values(repo: Path, path: Path) -> tuple[str, str, str]:
 def command_build(args: argparse.Namespace) -> int:
     require_tools("git", "git.exe", "cmd.exe", "wslpath")
     repo = resolve_repo(args.repo)
-    require_clean(repo)
-    selected = select_targets(repo, args.project, args.target)
     path = config_path(args.config)
     uv4, windows_repo, remote_id = configured_values(repo, path)
-    commit = git_text(repo, "rev-parse", "HEAD")
     windows_root = windows_git_text(windows_repo, "rev-parse", "--show-toplevel")
     windows_temp = cmd_environment("TEMP")
     temp_parent_windows = str(PureWindowsPath(windows_temp) / CONFIG_DIR_NAME)
@@ -718,8 +822,18 @@ def command_build(args: argparse.Namespace) -> int:
     started = dt.datetime.now(dt.timezone.utc)
 
     try:
-        bundle = ensure_windows_commit(repo, windows_root, commit, transfer_dir)
-        windows_git(windows_root, "worktree", "add", "--detach", worktree_windows, commit)
+        snapshot = prepare_source_snapshot(repo, transfer_dir)
+        selected = select_targets(repo, args.project, args.target, snapshot.commit)
+        bundle = ensure_windows_commit(
+            repo,
+            windows_root,
+            snapshot.commit,
+            transfer_dir,
+            prefer_bundle=snapshot.dirty,
+        )
+        windows_git(
+            windows_root, "worktree", "add", "--detach", worktree_windows, snapshot.commit
+        )
         worktree_added = True
         worktree_wsl = windows_to_wsl(worktree_windows)
         raw_log_dir_windows = str(PureWindowsPath(worktree_windows) / ".yzc-keil-build-logs")
@@ -764,7 +878,12 @@ def command_build(args: argparse.Namespace) -> int:
     finished = dt.datetime.now(dt.timezone.utc)
     summary = {
         "remote_id": remote_id,
-        "commit": commit,
+        "commit": snapshot.commit,
+        "base_commit": snapshot.base_commit,
+        "snapshot_commit": snapshot.commit,
+        "tree_hash": snapshot.tree_hash,
+        "dirty_snapshot": snapshot.dirty,
+        "includes_untracked": snapshot.includes_untracked,
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "results": [result.to_dict() for result in results],
@@ -773,7 +892,10 @@ def command_build(args: argparse.Namespace) -> int:
     summary_path = run_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
-    print(f"Commit: {commit}")
+    print(f"Base HEAD: {snapshot.base_commit}")
+    print(f"Snapshot commit: {snapshot.commit}")
+    print(f"Tree: {snapshot.tree_hash}")
+    print(f"Includes untracked files: {'yes' if snapshot.includes_untracked else 'no'}")
     for result in results:
         counts = (
             f"{result.errors} error(s), {result.warnings} warning(s)"
@@ -874,7 +996,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_path(show)
     show.set_defaults(func=command_config_show)
 
-    build = commands.add_parser("build", help="build tracked Keil projects at WSL HEAD")
+    build = commands.add_parser(
+        "build", help="build Keil projects from an exact WSL worktree snapshot"
+    )
     build.add_argument("--repo", default=".", help="WSL repository path")
     build.add_argument("--project", help="repository-relative *.uvprojx path")
     build.add_argument(

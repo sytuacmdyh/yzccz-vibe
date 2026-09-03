@@ -60,5 +60,4 @@ The script writes this versioned structure atomically and restricts its permissi
 - A Windows Keil installation containing `UV4.exe`
 - A Windows clone whose normalized `origin` matches the WSL repository
 
-The Windows clone's current branch, checkout, and dirty files are left alone. Git objects may be fetched into it, while compilation occurs in a temporary detached worktree at the exact clean WSL `HEAD`.
-
+The Windows clone's current branch, checkout, and dirty files are left alone. Git objects may be fetched into it, while compilation occurs in a temporary detached worktree at an exact snapshot of the WSL worktree. For an uncommitted snapshot, the script transfers a temporary commit through a Git bundle instead of relying on the remote.

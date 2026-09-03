@@ -23,6 +23,31 @@ sys.modules[SPEC.name] = keil_build
 SPEC.loader.exec_module(keil_build)
 
 
+def initialize_repository(path: Path) -> str:
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.name", "Test User"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    (path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    (path / "staged.txt").write_text("base\n", encoding="utf-8")
+    (path / "deleted.txt").write_text("base\n", encoding="utf-8")
+    (path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-qm", "initial"], check=True
+    )
+    return subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+
+
 @pytest.mark.parametrize(
     ("remote", "expected"),
     [
@@ -86,6 +111,190 @@ def test_configuration_status_reports_missing_fields(
         "projects.example.com/group/project.windows_repo",
     ]
     assert status["invalid"] == []
+
+
+def test_prepare_source_snapshot_reuses_clean_head(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    head = initialize_repository(repository)
+
+    snapshot = keil_build.prepare_source_snapshot(repository, tmp_path / "transfer")
+
+    assert snapshot.base_commit == head
+    assert snapshot.commit == head
+    assert snapshot.tree_hash == keil_build.git_text(
+        repository, "rev-parse", "HEAD^{tree}"
+    )
+    assert snapshot.dirty is False
+    assert snapshot.includes_untracked is False
+
+
+def test_prepare_source_snapshot_captures_dirty_worktree_without_altering_it(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    transfer = tmp_path / "transfer"
+    repository.mkdir()
+    transfer.mkdir()
+    head = initialize_repository(repository)
+    index = Path(
+        subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--git-path", "index"],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+    )
+    if not index.is_absolute():
+        index = repository / index
+
+    (repository / "tracked.txt").write_text("unstaged\n", encoding="utf-8")
+    (repository / "staged.txt").write_text("staged\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "staged.txt"], check=True
+    )
+    (repository / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    (repository / "nested").mkdir()
+    (repository / "nested" / "new.uvprojx").write_text(
+        "<Project/>", encoding="utf-8"
+    )
+    (repository / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+    (repository / "deleted.txt").unlink()
+    status_before = keil_build.git(repository, "status", "--porcelain=v1").stdout
+    index_before = index.read_bytes()
+
+    snapshot = keil_build.prepare_source_snapshot(repository, transfer)
+
+    assert snapshot.base_commit == head
+    assert snapshot.commit != head
+    assert snapshot.tree_hash == keil_build.git_text(
+        repository, "rev-parse", f"{snapshot.commit}^{{tree}}"
+    )
+    assert snapshot.dirty is True
+    assert snapshot.includes_untracked is True
+    assert keil_build.discover_projects(repository, snapshot.commit) == [
+        "nested/new.uvprojx"
+    ]
+    assert keil_build.git_text(repository, "show", f"{snapshot.commit}:tracked.txt") == (
+        "unstaged"
+    )
+    assert keil_build.git_text(repository, "show", f"{snapshot.commit}:staged.txt") == (
+        "staged"
+    )
+    assert keil_build.git_text(repository, "show", f"{snapshot.commit}:untracked.txt") == (
+        "untracked"
+    )
+    assert (
+        keil_build.git(
+            repository, "cat-file", "-e", f"{snapshot.commit}:deleted.txt", check=False
+        ).returncode
+        != 0
+    )
+    assert (
+        keil_build.git(
+            repository, "cat-file", "-e", f"{snapshot.commit}:ignored.txt", check=False
+        ).returncode
+        != 0
+    )
+    assert keil_build.git_text(repository, "rev-parse", "HEAD") == head
+    assert index.read_bytes() == index_before
+    assert keil_build.git(repository, "status", "--porcelain=v1").stdout == status_before
+
+
+def test_dirty_snapshot_prefers_bundle_and_removes_temporary_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    transfer = tmp_path / "transfer"
+    repository.mkdir()
+    transfer.mkdir()
+    initialize_repository(repository)
+    (repository / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    snapshot = keil_build.prepare_source_snapshot(repository, transfer)
+    existence = iter([False, True])
+    windows_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        keil_build, "windows_commit_exists", lambda windows_repo, commit: next(existence)
+    )
+    monkeypatch.setattr(keil_build, "wsl_to_windows", lambda path: str(path))
+
+    def fake_windows_git(
+        windows_repo: str, *args: str, check: bool = True
+    ) -> subprocess.CompletedProcess[bytes]:
+        windows_calls.append(args)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(keil_build, "windows_git", fake_windows_git)
+
+    bundle = keil_build.ensure_windows_commit(
+        repository,
+        r"C:\repo",
+        snapshot.commit,
+        transfer,
+        prefer_bundle=True,
+    )
+
+    assert bundle is not None and bundle.is_file()
+    assert all(call[:2] != ("fetch", "origin") for call in windows_calls)
+    assert windows_calls[0][0] == "fetch"
+    destination = tmp_path / "destination.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(destination)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(destination),
+            "fetch",
+            str(bundle),
+            windows_calls[0][-1],
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(destination), "cat-file", "-e", snapshot.commit], check=True
+    )
+    assert keil_build.git_text(
+        repository, "for-each-ref", "--format=%(refname)", "refs/yzc-keil-build"
+    ) == ""
+    subprocess.run(
+        ["git", "-C", str(repository), "bundle", "verify", str(bundle)], check=True
+    )
+
+
+def test_prepare_source_snapshot_rejects_dirty_submodule(tmp_path: Path) -> None:
+    submodule = tmp_path / "submodule"
+    repository = tmp_path / "repository"
+    transfer = tmp_path / "transfer"
+    submodule.mkdir()
+    repository.mkdir()
+    transfer.mkdir()
+    initialize_repository(submodule)
+    initialize_repository(repository)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "-C",
+            str(repository),
+            "submodule",
+            "add",
+            "-q",
+            str(submodule),
+            "deps/submodule",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qam", "add submodule"],
+        check=True,
+    )
+    (repository / "deps" / "submodule" / "tracked.txt").write_text(
+        "dirty\n", encoding="utf-8"
+    )
+
+    with pytest.raises(keil_build.SetupError, match="dirty submodules"):
+        keil_build.prepare_source_snapshot(repository, transfer)
 
 
 @pytest.mark.parametrize(
