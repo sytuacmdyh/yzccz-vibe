@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""Build Keil projects from an exact snapshot of a WSL Git worktree."""
+"""Build or flash Keil projects from an exact snapshot of a WSL Git worktree."""
 
 from __future__ import annotations
 
@@ -31,10 +31,9 @@ CONFIG_DIR_NAME = "yzc-keil-wsl-build"
 CONFIG_FILE_NAME = "config.json"
 STATE_DIR_NAME = "yzc-keil-wsl-build"
 DEFAULT_TIMEOUT = 300
-LOG_RESULT_RE = re.compile(
-    r"(\d+)\s+Error\(s\),\s*(\d+)\s+Warning\(s\)", re.IGNORECASE
-)
+LOG_RESULT_RE = re.compile(r"(\d+)\s+Error\(s\),\s*(\d+)\s+Warning\(s\)", re.IGNORECASE)
 SCP_REMOTE_RE = re.compile(r"^(?:[^@/]+@)?([^:/]+):(.+)$")
+FLASH_SUCCESS_MARKERS = ("Erase Done.", "Programming Done.", "Verify OK.")
 
 
 class SetupError(RuntimeError):
@@ -71,6 +70,42 @@ class BuildResult:
         }
 
 
+@dataclass
+class FlashResult:
+    project: str
+    target: str
+    uv4_exit_code: int | None
+    status: str
+    log: str | None
+    detail: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "project": self.project,
+            "target": self.target,
+            "uv4_exit_code": self.uv4_exit_code,
+            "status": self.status,
+            "log": self.log,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class FlashOptions:
+    path: str
+    source: str | None
+    sha256: str | None
+    copied_from_windows_clone: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "source": self.source,
+            "sha256": self.sha256,
+            "copied_from_windows_clone": self.copied_from_windows_clone,
+        }
+
+
 @dataclass(frozen=True)
 class SourceSnapshot:
     base_commit: str
@@ -102,7 +137,9 @@ def run(
         raise SetupError(f"required command not found: {args[0]}") from exc
     if check and result.returncode != 0:
         detail = decode_output(result.stderr or result.stdout).strip()
-        raise SetupError(f"command failed ({result.returncode}): {quote_command(args)}\n{detail}")
+        raise SetupError(
+            f"command failed ({result.returncode}): {quote_command(args)}\n{detail}"
+        )
     return result
 
 
@@ -144,7 +181,9 @@ def windows_git_text(windows_repo: str, *args: str) -> str:
 
 def resolve_repo(value: str) -> Path:
     candidate = Path(value).expanduser().resolve()
-    result = run(["git", "-C", str(candidate), "rev-parse", "--show-toplevel"], check=True)
+    result = run(
+        ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"], check=True
+    )
     return Path(decode_output(result.stdout).strip()).resolve()
 
 
@@ -391,7 +430,7 @@ def require_clean_submodules(repo: Path) -> None:
         "foreach",
         "--quiet",
         "--recursive",
-        'git diff --quiet && git diff --cached --quiet && '
+        "git diff --quiet && git diff --cached --quiet && "
         'test -z "$(git ls-files --others --exclude-standard)"',
         check=False,
     )
@@ -508,8 +547,19 @@ def referenced_text(repo: Path, project: str, target: ET.Element) -> str:
     project_path = repo / project
     chunks = [project_path.read_text(encoding="utf-8", errors="ignore")]
     text_suffixes = {
-        ".asm", ".bat", ".c", ".cc", ".cmd", ".cpp", ".h", ".hpp",
-        ".inc", ".ini", ".py", ".s", ".txt",
+        ".asm",
+        ".bat",
+        ".c",
+        ".cc",
+        ".cmd",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".inc",
+        ".ini",
+        ".py",
+        ".s",
+        ".txt",
     }
     for element in target.iter():
         if local_name(element) != "FilePath" or not element.text:
@@ -534,7 +584,9 @@ def referenced_text(repo: Path, project: str, target: ET.Element) -> str:
     return "\n".join(chunks).replace("\\", "/").casefold()
 
 
-def target_output_token(repo: Path, item: ProjectTarget, target: ET.Element) -> str | None:
+def target_output_token(
+    repo: Path, item: ProjectTarget, target: ET.Element
+) -> str | None:
     output_directory = first_xml_text(target, "OutputDirectory")
     output_name = first_xml_text(target, "OutputName")
     if not output_directory or not output_name or "$" in output_directory:
@@ -550,18 +602,15 @@ def target_output_token(repo: Path, item: ProjectTarget, target: ET.Element) -> 
     return f"{relative_output.rstrip('/')}/{output_name}".casefold()
 
 
-def order_targets_by_dependencies(
+def target_dependencies(
     repo: Path, selected: Sequence[ProjectTarget]
-) -> list[ProjectTarget]:
-    """Stably order targets when their text inputs reference another target's output."""
-    elements: dict[ProjectTarget, ET.Element] = {}
+) -> dict[ProjectTarget, set[ProjectTarget]]:
     outputs: dict[ProjectTarget, str] = {}
     corpora: dict[ProjectTarget, str] = {}
     for item in selected:
         element = target_element(repo / item.project, item.target)
         if element is None:
             continue
-        elements[item] = element
         token = target_output_token(repo, item, element)
         if token:
             outputs[item] = token
@@ -575,11 +624,18 @@ def order_targets_by_dependencies(
         for producer, token in outputs.items():
             if producer != consumer and token in corpus:
                 dependencies[consumer].add(producer)
+    return dependencies
 
+
+def order_targets(
+    selected: Sequence[ProjectTarget],
+    dependencies: dict[ProjectTarget, set[ProjectTarget]],
+) -> list[ProjectTarget]:
     remaining = list(selected)
     ordered: list[ProjectTarget] = []
     while remaining:
-        ready = [item for item in remaining if not (dependencies[item] & set(remaining))]
+        pending = set(remaining)
+        ready = [item for item in remaining if not (dependencies[item] & pending)]
         if not ready:
             ordered.extend(remaining)
             break
@@ -587,6 +643,28 @@ def order_targets_by_dependencies(
             ordered.append(item)
             remaining.remove(item)
     return ordered
+
+
+def order_targets_by_dependencies(
+    repo: Path, selected: Sequence[ProjectTarget]
+) -> list[ProjectTarget]:
+    """Stably order targets when their text inputs reference another target's output."""
+    return order_targets(selected, target_dependencies(repo, selected))
+
+
+def dependency_closure(
+    target: ProjectTarget,
+    dependencies: dict[ProjectTarget, set[ProjectTarget]],
+) -> set[ProjectTarget]:
+    required: set[ProjectTarget] = set()
+    pending = [target]
+    while pending:
+        item = pending.pop()
+        if item in required:
+            continue
+        required.add(item)
+        pending.extend(dependencies.get(item, ()))
+    return required
 
 
 def discover_projects(repo: Path, treeish: str | None = None) -> list[str]:
@@ -627,7 +705,9 @@ def select_targets(
         requested = normalize_project_filter(project_filter)
         projects = [project for project in projects if project == requested]
         if not projects:
-            raise SetupError(f"Keil project not found in the build snapshot: {requested}")
+            raise SetupError(
+                f"Keil project not found in the build snapshot: {requested}"
+            )
     if not projects:
         raise SetupError("no *.uvprojx files were found in the build snapshot")
 
@@ -636,7 +716,11 @@ def select_targets(
     for project in projects:
         targets = parse_project_targets(repo / project)
         available_targets.update(targets)
-        chosen = [target for target in targets if not target_filters or target in target_filters]
+        chosen = [
+            target
+            for target in targets
+            if not target_filters or target in target_filters
+        ]
         selected.extend(ProjectTarget(project, target) for target in chosen)
 
     unknown = sorted(set(target_filters) - available_targets)
@@ -647,8 +731,23 @@ def select_targets(
     return order_targets_by_dependencies(repo, selected)
 
 
+def select_flash_plan(
+    repo: Path,
+    project: str,
+    target: str,
+    treeish: str | None = None,
+) -> tuple[ProjectTarget, list[ProjectTarget]]:
+    flash_target = select_targets(repo, project, [target], treeish)[0]
+    all_targets = select_targets(repo, None, [], treeish)
+    dependencies = target_dependencies(repo, all_targets)
+    required = dependency_closure(flash_target, dependencies)
+    return flash_target, [item for item in all_targets if item in required]
+
+
 def windows_commit_exists(windows_repo: str, commit: str) -> bool:
-    result = windows_git(windows_repo, "cat-file", "-e", f"{commit}^{{commit}}", check=False)
+    result = windows_git(
+        windows_repo, "cat-file", "-e", f"{commit}^{{commit}}", check=False
+    )
     return result.returncode == 0
 
 
@@ -677,7 +776,9 @@ def ensure_windows_commit(
     finally:
         git(wsl_repo, "update-ref", "-d", temporary_ref, check=False)
     windows_bundle = wsl_to_windows(bundle)
-    result = windows_git(windows_repo, "fetch", windows_bundle, temporary_ref, check=False)
+    result = windows_git(
+        windows_repo, "fetch", windows_bundle, temporary_ref, check=False
+    )
     if result.returncode != 0 or not windows_commit_exists(windows_repo, commit):
         detail = decode_output(result.stderr or result.stdout).strip()
         raise SetupError(f"failed to transfer commit {commit} to Windows Git: {detail}")
@@ -687,7 +788,10 @@ def ensure_windows_commit(
 def is_windows_descendant(child: str, parent: str) -> bool:
     child_parts = tuple(part.casefold() for part in PureWindowsPath(child).parts)
     parent_parts = tuple(part.casefold() for part in PureWindowsPath(parent).parts)
-    return len(child_parts) > len(parent_parts) and child_parts[: len(parent_parts)] == parent_parts
+    return (
+        len(child_parts) > len(parent_parts)
+        and child_parts[: len(parent_parts)] == parent_parts
+    )
 
 
 def sanitize_filename(value: str) -> str:
@@ -707,12 +811,76 @@ def parse_keil_log(data: bytes) -> tuple[int, int] | None:
     return int(errors), int(warnings)
 
 
+def parse_flash_log(data: bytes) -> tuple[bool, str | None]:
+    text = decode_keil_log(data)
+    folded = text.casefold()
+    missing = [
+        marker for marker in FLASH_SUCCESS_MARKERS if marker.casefold() not in folded
+    ]
+    if not missing:
+        return True, None
+    failures = [
+        line.strip()
+        for line in text.splitlines()
+        if "error" in line.casefold() or "failed" in line.casefold()
+    ]
+    detail = f"missing Flash success marker(s): {', '.join(missing)}"
+    if failures:
+        detail += f"; {failures[-1]}"
+    return False, detail
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def inject_flash_options(
+    windows_repo_wsl: Path,
+    worktree_wsl: Path,
+    item: ProjectTarget,
+) -> FlashOptions:
+    relative = PurePosixPath(item.project).with_suffix(".uvoptx")
+    source = windows_repo_wsl / relative
+    destination = worktree_wsl / relative
+    copied = False
+    if source.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(source, destination)
+        except OSError as exc:
+            raise SetupError(f"cannot copy local Keil options {source}: {exc}") from exc
+        copied = True
+    active = destination if destination.is_file() else None
+    return FlashOptions(
+        path=relative.as_posix(),
+        source=str(source) if copied else None,
+        sha256=file_sha256(active) if active else None,
+        copied_from_windows_clone=copied,
+    )
+
+
 def uv4_command_args(
-    uv4: str, project: str, target: str, log: str
+    uv4: str, command: str, project: str, target: str, log: str
 ) -> list[str]:
     # WSL interop quotes each argv item for Windows. Embedding quotes here makes
     # cmd.exe receive literal backslashes and prevents UV4 from starting.
-    return ["cmd.exe", "/D", "/C", uv4, "-r", project, "-t", target, "-j0", "-o", log]
+    return [
+        "cmd.exe",
+        "/D",
+        "/C",
+        uv4,
+        command,
+        project,
+        "-t",
+        target,
+        "-j0",
+        "-o",
+        log,
+    ]
 
 
 def build_one(
@@ -730,26 +898,40 @@ def build_one(
     raw_log_windows = str(PureWindowsPath(raw_log_dir_windows) / stem)
     raw_log_wsl = raw_log_dir_wsl / stem
     saved_log = saved_log_dir / stem
-    project_windows = str(PureWindowsPath(worktree_windows) / PureWindowsPath(item.project))
+    project_windows = str(
+        PureWindowsPath(worktree_windows) / PureWindowsPath(item.project)
+    )
     project_cwd = worktree_wsl / PurePosixPath(item.project).parent
     print(f"Building {item.project} :: {item.target}")
     try:
         process = run(
-            uv4_command_args(uv4, project_windows, item.target, raw_log_windows),
+            uv4_command_args(uv4, "-r", project_windows, item.target, raw_log_windows),
             cwd=project_cwd,
             timeout=timeout,
             check=False,
         )
     except subprocess.TimeoutExpired:
         return BuildResult(
-            item.project, item.target, None, None, None, "timeout", None,
+            item.project,
+            item.target,
+            None,
+            None,
+            None,
+            "timeout",
+            None,
             f"UV4 exceeded {timeout} seconds",
         )
 
     if not raw_log_wsl.is_file():
         detail = decode_output(process.stderr or process.stdout).strip()
         return BuildResult(
-            item.project, item.target, None, None, process.returncode, "failed", None,
+            item.project,
+            item.target,
+            None,
+            None,
+            process.returncode,
+            "failed",
+            None,
             "UV4 did not create a build log" + (f": {detail}" if detail else ""),
         )
 
@@ -757,8 +939,14 @@ def build_one(
     counts = parse_keil_log(saved_log.read_bytes())
     if counts is None:
         return BuildResult(
-            item.project, item.target, None, None, process.returncode, "failed",
-            str(saved_log), "could not find the Keil error/warning summary in the log",
+            item.project,
+            item.target,
+            None,
+            None,
+            process.returncode,
+            "failed",
+            str(saved_log),
+            "could not find the Keil error/warning summary in the log",
         )
     errors, warnings = counts
     return BuildResult(
@@ -769,6 +957,70 @@ def build_one(
         process.returncode,
         "success" if errors == 0 else "failed",
         str(saved_log),
+    )
+
+
+def flash_one(
+    uv4: str,
+    worktree_windows: str,
+    worktree_wsl: Path,
+    item: ProjectTarget,
+    raw_log_dir_windows: str,
+    raw_log_dir_wsl: Path,
+    saved_log_dir: Path,
+    timeout: int,
+) -> FlashResult:
+    digest = hashlib.sha256(f"{item.project}\0{item.target}".encode()).hexdigest()[:10]
+    stem = (
+        f"{sanitize_filename(Path(item.project).stem)}-"
+        f"{sanitize_filename(item.target)}-{digest}-flash.log"
+    )
+    raw_log_windows = str(PureWindowsPath(raw_log_dir_windows) / stem)
+    raw_log_wsl = raw_log_dir_wsl / stem
+    saved_log = saved_log_dir / stem
+    project_windows = str(
+        PureWindowsPath(worktree_windows) / PureWindowsPath(item.project)
+    )
+    project_cwd = worktree_wsl / PurePosixPath(item.project).parent
+    print(f"Flashing {item.project} :: {item.target}")
+    try:
+        process = run(
+            uv4_command_args(uv4, "-f", project_windows, item.target, raw_log_windows),
+            cwd=project_cwd,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return FlashResult(
+            item.project,
+            item.target,
+            None,
+            "timeout",
+            None,
+            f"UV4 Flash Download exceeded {timeout} seconds",
+        )
+
+    if not raw_log_wsl.is_file():
+        detail = decode_output(process.stderr or process.stdout).strip()
+        return FlashResult(
+            item.project,
+            item.target,
+            process.returncode,
+            "failed",
+            None,
+            "UV4 did not create a Flash Download log"
+            + (f": {detail}" if detail else ""),
+        )
+
+    shutil.copy2(raw_log_wsl, saved_log)
+    success, detail = parse_flash_log(saved_log.read_bytes())
+    return FlashResult(
+        item.project,
+        item.target,
+        process.returncode,
+        "success" if success else "failed",
+        str(saved_log),
+        detail,
     )
 
 
@@ -796,7 +1048,7 @@ def configured_values(repo: Path, path: Path) -> tuple[str, str, str]:
     )
 
 
-def command_build(args: argparse.Namespace) -> int:
+def command_run(args: argparse.Namespace, *, flash: bool) -> int:
     require_tools("git", "git.exe", "cmd.exe", "wslpath")
     repo = resolve_repo(args.repo)
     path = config_path(args.config)
@@ -816,6 +1068,9 @@ def command_build(args: argparse.Namespace) -> int:
     saved_logs = run_dir / "logs"
     saved_logs.mkdir()
     results: list[BuildResult] = []
+    flash_target: ProjectTarget | None = None
+    flash_options: FlashOptions | None = None
+    flash_result: FlashResult | None = None
     cleanup_errors: list[str] = []
     worktree_added = False
     bundle: Path | None = None
@@ -823,7 +1078,12 @@ def command_build(args: argparse.Namespace) -> int:
 
     try:
         snapshot = prepare_source_snapshot(repo, transfer_dir)
-        selected = select_targets(repo, args.project, args.target, snapshot.commit)
+        if flash:
+            flash_target, selected = select_flash_plan(
+                repo, args.project, args.target, snapshot.commit
+            )
+        else:
+            selected = select_targets(repo, args.project, args.target, snapshot.commit)
         bundle = ensure_windows_commit(
             repo,
             windows_root,
@@ -832,13 +1092,24 @@ def command_build(args: argparse.Namespace) -> int:
             prefer_bundle=snapshot.dirty,
         )
         windows_git(
-            windows_root, "worktree", "add", "--detach", worktree_windows, snapshot.commit
+            windows_root,
+            "worktree",
+            "add",
+            "--detach",
+            worktree_windows,
+            snapshot.commit,
         )
         worktree_added = True
         worktree_wsl = windows_to_wsl(worktree_windows)
-        raw_log_dir_windows = str(PureWindowsPath(worktree_windows) / ".yzc-keil-build-logs")
+        raw_log_dir_windows = str(
+            PureWindowsPath(worktree_windows) / ".yzc-keil-build-logs"
+        )
         raw_log_dir_wsl = worktree_wsl / ".yzc-keil-build-logs"
         raw_log_dir_wsl.mkdir()
+        if flash_target is not None:
+            flash_options = inject_flash_options(
+                windows_to_wsl(windows_root), worktree_wsl, flash_target
+            )
         for item in selected:
             results.append(
                 build_one(
@@ -852,10 +1123,36 @@ def command_build(args: argparse.Namespace) -> int:
                     args.timeout,
                 )
             )
+        if flash_target is not None:
+            if results and all(result.status == "success" for result in results):
+                flash_result = flash_one(
+                    uv4,
+                    worktree_windows,
+                    worktree_wsl,
+                    flash_target,
+                    raw_log_dir_windows,
+                    raw_log_dir_wsl,
+                    saved_logs,
+                    args.timeout,
+                )
+            else:
+                flash_result = FlashResult(
+                    flash_target.project,
+                    flash_target.target,
+                    None,
+                    "skipped",
+                    None,
+                    "one or more required builds failed",
+                )
     finally:
         if worktree_added:
             removed = windows_git(
-                windows_root, "worktree", "remove", "--force", worktree_windows, check=False
+                windows_root,
+                "worktree",
+                "remove",
+                "--force",
+                worktree_windows,
+                check=False,
             )
             if removed.returncode != 0:
                 cleanup_errors.append(
@@ -876,7 +1173,8 @@ def command_build(args: argparse.Namespace) -> int:
         shutil.rmtree(transfer_dir, ignore_errors=True)
 
     finished = dt.datetime.now(dt.timezone.utc)
-    summary = {
+    summary: dict[str, Any] = {
+        "operation": "flash" if flash else "build",
         "remote_id": remote_id,
         "commit": snapshot.commit,
         "base_commit": snapshot.base_commit,
@@ -889,8 +1187,13 @@ def command_build(args: argparse.Namespace) -> int:
         "results": [result.to_dict() for result in results],
         "cleanup_errors": cleanup_errors,
     }
+    if flash:
+        summary["flash_options"] = flash_options.to_dict() if flash_options else None
+        summary["flash"] = flash_result.to_dict() if flash_result else None
     summary_path = run_dir / "summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(summary, indent=2, ensure_ascii=True) + "\n", encoding="utf-8"
+    )
 
     print(f"Base HEAD: {snapshot.base_commit}")
     print(f"Snapshot commit: {snapshot.commit}")
@@ -903,11 +1206,35 @@ def command_build(args: argparse.Namespace) -> int:
             else result.detail or "no result"
         )
         print(f"{result.status.upper()}: {result.project} :: {result.target}: {counts}")
+    if flash_options is not None:
+        options_status = (
+            f"copied from {flash_options.source}"
+            if flash_options.copied_from_windows_clone
+            else "using snapshot copy"
+            if flash_options.sha256
+            else "not found"
+        )
+        print(f"Flash options: {flash_options.path}: {options_status}")
+    if flash_result is not None:
+        print(
+            f"FLASH {flash_result.status.upper()}: "
+            f"{flash_result.project} :: {flash_result.target}: "
+            f"{flash_result.detail or 'Erase, programming, and verification succeeded'}"
+        )
     for error in cleanup_errors:
         print(f"CLEANUP ERROR: {error}", file=sys.stderr)
     print(f"Summary: {summary_path}")
-    failed = not results or any(result.status != "success" for result in results)
-    return 1 if failed or cleanup_errors else 0
+    build_failed = not results or any(result.status != "success" for result in results)
+    flash_failed = flash and (flash_result is None or flash_result.status != "success")
+    return 1 if build_failed or flash_failed or cleanup_errors else 0
+
+
+def command_build(args: argparse.Namespace) -> int:
+    return command_run(args, flash=False)
+
+
+def command_flash(args: argparse.Namespace) -> int:
+    return command_run(args, flash=True)
 
 
 def command_config_status(args: argparse.Namespace) -> int:
@@ -969,13 +1296,19 @@ def build_parser() -> argparse.ArgumentParser:
     config = commands.add_parser("config", help="inspect or update local configuration")
     config_commands = config.add_subparsers(dest="config_command", required=True)
 
-    status = config_commands.add_parser("status", help="validate configuration for a repository")
+    status = config_commands.add_parser(
+        "status", help="validate configuration for a repository"
+    )
     status.add_argument("--repo", default=".", help="WSL repository path")
-    status.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    status.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON"
+    )
     add_config_path(status)
     status.set_defaults(func=command_config_status)
 
-    set_keil = config_commands.add_parser("set-keil", help="store the Windows UV4.exe path")
+    set_keil = config_commands.add_parser(
+        "set-keil", help="store the Windows UV4.exe path"
+    )
     set_keil.add_argument("--uv4", required=True, help="Windows path to UV4.exe")
     add_config_path(set_keil)
     set_keil.set_defaults(func=command_config_set_keil)
@@ -990,7 +1323,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_path(set_project)
     set_project.set_defaults(func=command_config_set_project)
 
-    show = config_commands.add_parser("show", help="show validated configuration status")
+    show = config_commands.add_parser(
+        "show", help="show validated configuration status"
+    )
     show.add_argument("--repo", default=".", help="WSL repository path")
     show.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     add_config_path(show)
@@ -1002,11 +1337,32 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--repo", default=".", help="WSL repository path")
     build.add_argument("--project", help="repository-relative *.uvprojx path")
     build.add_argument(
-        "--target", action="append", default=[], help="target name; repeat to select several"
+        "--target",
+        action="append",
+        default=[],
+        help="target name; repeat to select several",
     )
-    build.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="seconds per target")
+    build.add_argument(
+        "--timeout", type=int, default=DEFAULT_TIMEOUT, help="seconds per target"
+    )
     add_config_path(build)
     build.set_defaults(func=command_build)
+    flash = commands.add_parser(
+        "flash", help="build dependencies and flash one target without showing the GUI"
+    )
+    flash.add_argument("--repo", default=".", help="WSL repository path")
+    flash.add_argument(
+        "--project", required=True, help="repository-relative *.uvprojx path to flash"
+    )
+    flash.add_argument("--target", required=True, help="single target name to flash")
+    flash.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help="seconds per build or flash step",
+    )
+    add_config_path(flash)
+    flash.set_defaults(func=command_flash)
     return parser
 
 

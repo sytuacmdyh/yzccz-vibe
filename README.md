@@ -11,7 +11,7 @@
 | 技能 | 说明 |
 |------|------|
 | `yzc-commit` | 生成中文 Conventional Commits 格式的提交信息并执行 git commit |
-| `yzc-keil-wsl-build` | 从 WSL 通过 Windows Keil 命令行编译，并用临时 Git 快照和 worktree 精确验证当前文件状态 |
+| `yzc-keil-wsl` | 从 WSL 通过 Windows Keil 命令行编译或无界面烧写，并用临时 Git 快照和 worktree 精确验证当前文件状态 |
 | `yzc-modbus-test` | CSV 驱动的 Modbus 串口测试，支持目录扫描或显式文件列表，并可控制 DeviceSimulator、驱动 EMS Modbus Slave，以及通过捆绑的 EMS MQTT master 发送/校验 MQTT 消息 |
 
 ## 使用 npx skills 安装
@@ -37,7 +37,7 @@ npx skills add sytuacmdyh/yzccz-vibe --list
 只全局安装 Keil WSL 编译技能到所有支持的代理：
 
 ```bash
-npx skills add sytuacmdyh/yzccz-vibe -g -s yzc-keil-wsl-build -a '*' -y
+npx skills add sytuacmdyh/yzccz-vibe -g -s yzc-keil-wsl -a '*' -y
 ```
 
-安装后，可在支持 Agent Skills 的 AI 编程助手中通过自然语言自动匹配，或按宿主提供的方式显式调用 `yzc-commit`、`yzc-keil-wsl-build`、`yzc-modbus-test`。
+安装后，可在支持 Agent Skills 的 AI 编程助手中通过自然语言自动匹配，或按宿主提供的方式显式调用 `yzc-commit`、`yzc-keil-wsl`、`yzc-modbus-test`。

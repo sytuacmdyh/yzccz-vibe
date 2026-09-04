@@ -12,7 +12,7 @@ import pytest
 SCRIPT = (
     Path(__file__).parents[1]
     / "skills"
-    / "keil-wsl-build"
+    / "keil-wsl"
     / "scripts"
     / "keil_build.py"
 )
@@ -37,9 +37,7 @@ def initialize_repository(path: Path) -> str:
     (path / "deleted.txt").write_text("base\n", encoding="utf-8")
     (path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(path), "add", "."], check=True)
-    subprocess.run(
-        ["git", "-C", str(path), "commit", "-qm", "initial"], check=True
-    )
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "initial"], check=True)
     return subprocess.run(
         ["git", "-C", str(path), "rev-parse", "HEAD"],
         check=True,
@@ -53,7 +51,10 @@ def initialize_repository(path: Path) -> str:
     [
         ("git@example.com:group/project.git", "example.com/group/project"),
         ("ssh://git@example.com/group/project.git", "example.com/group/project"),
-        ("ssh://git@example.com:2222/group/project.git", "example.com:2222/group/project"),
+        (
+            "ssh://git@example.com:2222/group/project.git",
+            "example.com:2222/group/project",
+        ),
         ("https://EXAMPLE.com/group/project.git", "example.com/group/project"),
         ("https://example.com/group/project/", "example.com/group/project"),
         ("/srv/git/group/project.git", "srv/git/group/project"),
@@ -63,7 +64,9 @@ def test_normalize_remote(remote: str, expected: str) -> None:
     assert keil_build.normalize_remote(remote) == expected
 
 
-def test_default_config_path_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_config_path_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     explicit = tmp_path / "explicit.json"
     monkeypatch.setenv(keil_build.CONFIG_ENV, str(explicit))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
@@ -75,7 +78,9 @@ def test_default_config_path_precedence(tmp_path: Path, monkeypatch: pytest.Monk
     )
 
 
-def test_save_and_load_config_atomically_with_private_permissions(tmp_path: Path) -> None:
+def test_save_and_load_config_atomically_with_private_permissions(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "private" / "config.json"
     config = {
         "version": 1,
@@ -150,14 +155,10 @@ def test_prepare_source_snapshot_captures_dirty_worktree_without_altering_it(
 
     (repository / "tracked.txt").write_text("unstaged\n", encoding="utf-8")
     (repository / "staged.txt").write_text("staged\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(repository), "add", "staged.txt"], check=True
-    )
+    subprocess.run(["git", "-C", str(repository), "add", "staged.txt"], check=True)
     (repository / "untracked.txt").write_text("untracked\n", encoding="utf-8")
     (repository / "nested").mkdir()
-    (repository / "nested" / "new.uvprojx").write_text(
-        "<Project/>", encoding="utf-8"
-    )
+    (repository / "nested" / "new.uvprojx").write_text("<Project/>", encoding="utf-8")
     (repository / "ignored.txt").write_text("ignored\n", encoding="utf-8")
     (repository / "deleted.txt").unlink()
     status_before = keil_build.git(repository, "status", "--porcelain=v1").stdout
@@ -175,15 +176,15 @@ def test_prepare_source_snapshot_captures_dirty_worktree_without_altering_it(
     assert keil_build.discover_projects(repository, snapshot.commit) == [
         "nested/new.uvprojx"
     ]
-    assert keil_build.git_text(repository, "show", f"{snapshot.commit}:tracked.txt") == (
-        "unstaged"
-    )
+    assert keil_build.git_text(
+        repository, "show", f"{snapshot.commit}:tracked.txt"
+    ) == ("unstaged")
     assert keil_build.git_text(repository, "show", f"{snapshot.commit}:staged.txt") == (
         "staged"
     )
-    assert keil_build.git_text(repository, "show", f"{snapshot.commit}:untracked.txt") == (
-        "untracked"
-    )
+    assert keil_build.git_text(
+        repository, "show", f"{snapshot.commit}:untracked.txt"
+    ) == ("untracked")
     assert (
         keil_build.git(
             repository, "cat-file", "-e", f"{snapshot.commit}:deleted.txt", check=False
@@ -198,7 +199,9 @@ def test_prepare_source_snapshot_captures_dirty_worktree_without_altering_it(
     )
     assert keil_build.git_text(repository, "rev-parse", "HEAD") == head
     assert index.read_bytes() == index_before
-    assert keil_build.git(repository, "status", "--porcelain=v1").stdout == status_before
+    assert (
+        keil_build.git(repository, "status", "--porcelain=v1").stdout == status_before
+    )
 
 
 def test_dirty_snapshot_prefers_bundle_and_removes_temporary_ref(
@@ -214,7 +217,9 @@ def test_dirty_snapshot_prefers_bundle_and_removes_temporary_ref(
     existence = iter([False, True])
     windows_calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(
-        keil_build, "windows_commit_exists", lambda windows_repo, commit: next(existence)
+        keil_build,
+        "windows_commit_exists",
+        lambda windows_repo, commit: next(existence),
     )
     monkeypatch.setattr(keil_build, "wsl_to_windows", lambda path: str(path))
 
@@ -253,9 +258,12 @@ def test_dirty_snapshot_prefers_bundle_and_removes_temporary_ref(
     subprocess.run(
         ["git", "-C", str(destination), "cat-file", "-e", snapshot.commit], check=True
     )
-    assert keil_build.git_text(
-        repository, "for-each-ref", "--format=%(refname)", "refs/yzc-keil-build"
-    ) == ""
+    assert (
+        keil_build.git_text(
+            repository, "for-each-ref", "--format=%(refname)", "refs/yzc-keil-build"
+        )
+        == ""
+    )
     subprocess.run(
         ["git", "-C", str(repository), "bundle", "verify", str(bundle)], check=True
     )
@@ -311,9 +319,38 @@ def test_parse_keil_log(content: bytes, expected: tuple[int, int] | None) -> Non
     assert keil_build.parse_keil_log(content) == expected
 
 
+@pytest.mark.parametrize(
+    ("content", "success", "detail_fragment"),
+    [
+        (
+            b"Erase Done.Programming Done.Verify OK.Application running ...",
+            True,
+            None,
+        ),
+        (
+            b"Internal DLL Error\nError: Flash Download failed - Target DLL cancelled",
+            False,
+            "Target DLL cancelled",
+        ),
+        (b"Erase Done.Programming Done.", False, "Verify OK."),
+    ],
+)
+def test_parse_flash_log_requires_all_success_markers(
+    content: bytes, success: bool, detail_fragment: str | None
+) -> None:
+    parsed_success, detail = keil_build.parse_flash_log(content)
+    assert parsed_success is success
+    if detail_fragment is None:
+        assert detail is None
+    else:
+        assert detail is not None
+        assert detail_fragment in detail
+
+
 def test_uv4_command_uses_separate_arguments_for_wsl_interop() -> None:
     command = keil_build.uv4_command_args(
         r"C:\Program Files\Keil\UV4.exe",
+        "-r",
         r"C:\Temp Path\firmware.uvprojx",
         "Target With Spaces",
         r"C:\Temp Path\build.log",
@@ -333,6 +370,62 @@ def test_uv4_command_uses_separate_arguments_for_wsl_interop() -> None:
         r"C:\Temp Path\build.log",
     ]
     assert all('"' not in argument for argument in command)
+
+
+def test_uv4_flash_command_hides_gui_and_uses_flash_mode() -> None:
+    command = keil_build.uv4_command_args(
+        r"C:\Program Files\Keil\UV4.exe",
+        "-f",
+        r"C:\Temp Path\firmware.uvprojx",
+        "Target With Spaces",
+        r"C:\Temp Path\flash.log",
+    )
+
+    assert command[4] == "-f"
+    assert "-j0" in command
+    assert command[-1] == r"C:\Temp Path\flash.log"
+    assert all('"' not in argument for argument in command)
+
+
+def test_inject_flash_options_copies_windows_sidecar(tmp_path: Path) -> None:
+    windows_repo = tmp_path / "windows-repo"
+    worktree = tmp_path / "worktree"
+    source = windows_repo / "App" / "Firmware.uvoptx"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"local probe configuration")
+
+    options = keil_build.inject_flash_options(
+        windows_repo,
+        worktree,
+        keil_build.ProjectTarget("App/Firmware.uvprojx", "App"),
+    )
+
+    destination = worktree / "App" / "Firmware.uvoptx"
+    assert destination.read_bytes() == source.read_bytes()
+    assert options.path == "App/Firmware.uvoptx"
+    assert options.source == str(source)
+    assert options.sha256 == keil_build.file_sha256(source)
+    assert options.copied_from_windows_clone is True
+
+
+def test_inject_flash_options_uses_snapshot_sidecar_when_no_local_copy(
+    tmp_path: Path,
+) -> None:
+    windows_repo = tmp_path / "windows-repo"
+    worktree = tmp_path / "worktree"
+    destination = worktree / "App" / "Firmware.uvoptx"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(b"tracked configuration")
+
+    options = keil_build.inject_flash_options(
+        windows_repo,
+        worktree,
+        keil_build.ProjectTarget("App/Firmware.uvprojx", "App"),
+    )
+
+    assert options.source is None
+    assert options.sha256 == keil_build.file_sha256(destination)
+    assert options.copied_from_windows_clone is False
 
 
 def test_parse_project_targets_handles_namespace_and_duplicates(tmp_path: Path) -> None:
@@ -382,7 +475,9 @@ def test_select_targets_filters_project_and_target(tmp_path: Path) -> None:
     assert selected == [keil_build.ProjectTarget("firmware.uvprojx", "Release")]
 
 
-def test_select_targets_orders_producer_before_referencing_consumer(tmp_path: Path) -> None:
+def test_select_targets_orders_producer_before_referencing_consumer(
+    tmp_path: Path,
+) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / "App").mkdir()
     (tmp_path / "Boot").mkdir()
@@ -412,6 +507,60 @@ def test_select_targets_orders_producer_before_referencing_consumer(tmp_path: Pa
         keil_build.ProjectTarget("Boot/Boot.uvprojx", "Boot"),
         keil_build.ProjectTarget("App/App.uvprojx", "App"),
     ]
+
+
+def test_select_flash_plan_builds_only_target_dependency_closure(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    for directory in ("App", "Boot", "Unrelated"):
+        (tmp_path / directory).mkdir()
+    (tmp_path / "embed.s").write_text(
+        r"INCBIN output\Boot\Boot.axf.bin", encoding="utf-8"
+    )
+    (tmp_path / "App" / "App.uvprojx").write_text(
+        "<Project><Targets><Target><TargetName>App</TargetName>"
+        "<TargetOption><TargetCommonOption><OutputDirectory>../output/App/</OutputDirectory>"
+        "<OutputName>App</OutputName></TargetCommonOption></TargetOption>"
+        "<Groups><Group><Files><File><FilePath>../embed.s</FilePath></File>"
+        "</Files></Group></Groups></Target></Targets></Project>",
+        encoding="utf-8",
+    )
+    (tmp_path / "Boot" / "Boot.uvprojx").write_text(
+        "<Project><Targets><Target><TargetName>Boot</TargetName>"
+        "<TargetOption><TargetCommonOption><OutputDirectory>../output/Boot/</OutputDirectory>"
+        "<OutputName>Boot</OutputName></TargetCommonOption></TargetOption>"
+        "</Target></Targets></Project>",
+        encoding="utf-8",
+    )
+    (tmp_path / "Unrelated" / "Other.uvprojx").write_text(
+        "<Project><Targets><Target><TargetName>Other</TargetName>"
+        "<TargetOption><TargetCommonOption><OutputDirectory>../output/Other/</OutputDirectory>"
+        "<OutputName>Other</OutputName></TargetCommonOption></TargetOption>"
+        "</Target></Targets></Project>",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+
+    flash_target, build_targets = keil_build.select_flash_plan(
+        tmp_path, "App/App.uvprojx", "App"
+    )
+
+    assert flash_target == keil_build.ProjectTarget("App/App.uvprojx", "App")
+    assert build_targets == [
+        keil_build.ProjectTarget("Boot/Boot.uvprojx", "Boot"),
+        keil_build.ProjectTarget("App/App.uvprojx", "App"),
+    ]
+
+
+def test_flash_parser_requires_one_project_and_target() -> None:
+    args = keil_build.build_parser().parse_args(
+        ["flash", "--project", "App/App.uvprojx", "--target", "App"]
+    )
+
+    assert args.project == "App/App.uvprojx"
+    assert args.target == "App"
+    assert args.func is keil_build.command_flash
 
 
 def test_windows_cleanup_descendant_guard() -> None:

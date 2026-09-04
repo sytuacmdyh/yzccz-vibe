@@ -61,3 +61,11 @@ The script writes this versioned structure atomically and restricts its permissi
 - A Windows clone whose normalized `origin` matches the WSL repository
 
 The Windows clone's current branch, checkout, and dirty files are left alone. Git objects may be fetched into it, while compilation occurs in a temporary detached worktree at an exact snapshot of the WSL worktree. For an uncommitted snapshot, the script transfers a temporary commit through a Git bundle instead of relying on the remote.
+
+## Local Flash options
+
+The `flash` command looks beside the selected project in the configured Windows clone for a same-named `.uvoptx` file. For example, flashing `App/MDK_Keil/App.uvprojx` uses `App/MDK_Keil/App.uvoptx` when that local sidecar exists. It is copied into the disposable worktree before invoking Keil and its SHA-256 is recorded in the run summary.
+
+This supports programmer selections and serial numbers that should remain machine-local. Do not commit a personal `.uvoptx` merely to make automated Flash Download work. If the Windows clone has no local sidecar, the script preserves a tracked `.uvoptx` from the exact Git snapshot; if neither exists, the `.uvprojx` must contain sufficient Flash configuration.
+
+The selected programmer and board must be connected and usable from Windows. WSL does not access the USB device directly; the Windows `UV4.exe` process does.
