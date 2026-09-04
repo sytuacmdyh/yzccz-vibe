@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Dict, Iterable, List
 
 
+LEGACY_PER_SLAVE_ADDRESSES = frozenset(
+    {0, 1, 2, 10, 11, 101, 102, 300, 301, 600, 637, 646, 800, 803}
+)
+
 @dataclass
 class RegisterDefinition:
     address: int
@@ -17,6 +21,7 @@ class RegisterDefinition:
     max_value: int = 65535
     description: str = ""
     data_type: str = "u16"
+    register_type: str = "hold"
     address_label: str = ""
     enum: Dict[str, str] = field(default_factory=dict)
     unit: str = ""
@@ -57,12 +62,14 @@ class RegisterDefinition:
             max_value=65535 if max_value is None else int(max_value),
             description=str(data.get("description", "")),
             data_type=str(data.get("data_type", "u16")),
+            register_type=str(data.get("register_type", "hold")),
             address_label=str(data.get("address_label", f"word {data['address']}")),
             enum={str(key): str(value) for key, value in dict(data.get("enum") or {}).items()},
             unit=str(data.get("unit", "")),
             transfer=str(data.get("transfer", "")),
             synthetic=bool(data.get("synthetic", False)),
         )
+
 
 
 @dataclass
@@ -122,6 +129,8 @@ class DeviceProfile:
         bindings: Dict[str, str],
         startup_preset: str = "",
         raw_data: Dict[str, object] | None = None,
+        device_model: str = "",
+        per_slave_addresses: Iterable[int] | None = None,
     ) -> None:
         self.profile_id = profile_id
         self.name = name
@@ -135,10 +144,15 @@ class DeviceProfile:
         self.coils = coils
         self.status_fields = status_fields
         self.bindings = bindings
+        self.device_model = device_model
+        self.per_slave_addresses = frozenset(
+            LEGACY_PER_SLAVE_ADDRESSES if per_slave_addresses is None else per_slave_addresses
+        )
         self.by_address = {register.address: register for register in registers}
         self.by_name = {register.name: register for register in registers}
         self.coil_by_address = {coil.address: coil for coil in coils}
         self.coil_by_name = {coil.name: coil for coil in coils}
+
 
     @classmethod
     def from_json(cls, path: Path) -> "DeviceProfile":
@@ -158,7 +172,10 @@ class DeviceProfile:
             bindings=dict(data.get("bindings", {})),
             startup_preset=str(data.get("startup_preset", "")),
             raw_data=data,
+            device_model=str(data.get("device_model", "")),
+            per_slave_addresses=data.get("per_slave_addresses"),
         )
+
 
     def to_dict(self) -> Dict[str, object]:
         """Return the original profile document so export does not lose protocol metadata."""
@@ -174,6 +191,8 @@ class DeviceProfile:
             "startup_preset": self.startup_preset,
             "status_fields": deepcopy(self.status_fields),
             "bindings": deepcopy(self.bindings),
+            "device_model": self.device_model,
+            "per_slave_addresses": sorted(self.per_slave_addresses),
             "registers": [
                 {
                     "address": item.address,
@@ -185,6 +204,7 @@ class DeviceProfile:
                     "max_raw": item.max_value,
                     "description": item.description,
                     "data_type": item.data_type,
+                    "register_type": item.register_type,
                     "enum": dict(item.enum),
                     "unit": item.unit,
                     "transfer": item.transfer,

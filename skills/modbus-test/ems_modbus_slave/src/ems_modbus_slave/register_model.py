@@ -3,7 +3,12 @@ from __future__ import annotations
 import threading
 from typing import Dict, List
 
-from .device_profile import CoilDefinition, DeviceProfile, RegisterDefinition
+from .device_profile import (
+    LEGACY_PER_SLAVE_ADDRESSES,
+    CoilDefinition,
+    DeviceProfile,
+    RegisterDefinition,
+)
 from .preset_loader import SimulatorPreset
 from .modbus_rtu import (
     EX_ILLEGAL_FUNCTION,
@@ -20,25 +25,8 @@ from .modbus_rtu import (
     build_exception,
 )
 
-# EMS 群控按从站 ID 轮询时，各机组独立维护的控制/状态 holding（其余地址仍共享）
-PER_SLAVE_HOLDING_ADDRESSES = frozenset(
-    {
-        0,  # 群控字
-        1,  # 开关机
-        2,  # 运行模式
-        10,
-        11,
-        101,
-        102,
-        300,
-        301,
-        600,  # 运行状态
-        637,  # 除霜
-        646,
-        800,
-        803,
-    }
-)
+# Legacy EMS profiles do not declare per-slave addresses.
+PER_SLAVE_HOLDING_ADDRESSES = LEGACY_PER_SLAVE_ADDRESSES
 
 def _flatten_profile_description(description: str) -> str:
     skip_prefixes = (
@@ -91,7 +79,7 @@ class RegisterBank:
             self._apply_preset_unlocked(preset)
 
     def _is_per_slave_address(self, address: int) -> bool:
-        return address in PER_SLAVE_HOLDING_ADDRESSES
+        return address in self.profile.per_slave_addresses
 
     def _read_holding(self, address: int, slave_id: int) -> int:
         key = (slave_id, address)
@@ -112,6 +100,17 @@ class RegisterBank:
         self._values[address] = value
         self.apply_binding(register.name, value)
         return True
+    def _apply_ec_fan_fault_reset(self, address: int, value: int, slave_id: int) -> None:
+        if (
+            self.profile.device_model == "ec_fan"
+            and address == 0xD000
+            and value & 0x0004
+            and self._is_per_slave_address(address)
+            and 0xD011 in self.profile.by_address
+            and self._is_per_slave_address(0xD011)
+        ):
+            self._per_slave_values[(slave_id, 0xD011)] = 0
+            self._per_slave_values[(slave_id, address)] = 0
 
     def _sync_run_status_from_power(self, slave_id: int) -> None:
         power = self._read_holding(1, slave_id)
@@ -358,7 +357,7 @@ class RegisterBank:
                 # Protocol reserved gaps (e.g. 677-679); real firmware returns 0.
                 values.append(0)
                 continue
-            if not register.readable:
+            if not register.readable or register.register_type != "hold":
                 return build_exception(
                     slave_id, FC_READ_HOLDING, EX_ILLEGAL_DATA_ADDRESS
                 )
@@ -383,7 +382,7 @@ class RegisterBank:
                 # Protocol reserved gaps; real firmware returns 0.
                 values.append(0)
                 continue
-            if not register.readable:
+            if not register.readable or register.register_type != "input":
                 return build_exception(
                     slave_id, FC_READ_INPUT, EX_ILLEGAL_DATA_ADDRESS
                 )
@@ -399,7 +398,9 @@ class RegisterBank:
         value = (frame[4] << 8) | frame[5]
         if not self.write(address, value, slave_id):
             return build_exception(slave_id, FC_WRITE_SINGLE, EX_ILLEGAL_DATA_ADDRESS)
-        return frame
+        response = frame
+        self._apply_ec_fan_fault_reset(address, value, slave_id)
+        return response
 
     def _handle_fc05(self, frame: bytes, slave_id: int) -> bytes:
         address = (frame[2] << 8) | frame[3]

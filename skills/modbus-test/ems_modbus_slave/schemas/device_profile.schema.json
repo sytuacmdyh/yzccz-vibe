@@ -8,26 +8,20 @@
     "name": { "type": "string" },
     "description": { "type": "string" },
     "source": { "type": "object" },
+    "device_model": { "type": "string" },
     "slave_id": { "type": "integer", "minimum": 1, "maximum": 247 },
     "baudrate": { "type": "integer" },
     "serial": { "type": "object" },
-    "function_codes": {
+    "function_codes": { "type": "array", "items": { "type": "integer" } },
+    "per_slave_addresses": {
       "type": "array",
-      "items": { "type": "integer" }
+      "items": { "type": "integer", "minimum": 0, "maximum": 65535 },
+      "uniqueItems": true
     },
     "startup_preset": { "type": "string" },
-    "status_fields": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/statusField" }
-    },
-    "registers": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/register" }
-    },
-    "coils": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/coil" }
-    }
+    "status_fields": { "type": "array", "items": { "$ref": "#/$defs/statusField" } },
+    "registers": { "type": "array", "items": { "$ref": "#/$defs/register" } },
+    "coils": { "type": "array", "items": { "$ref": "#/$defs/coil" } }
   },
   "$defs": {
     "statusField": {
@@ -51,6 +45,7 @@
         "key": { "type": "string" },
         "access": { "enum": ["r", "rw"] },
         "data_type": { "type": "string" },
+        "register_type": { "enum": ["hold", "input"], "default": "hold" },
         "default_raw": { "type": "integer", "minimum": 0, "maximum": 65535 },
         "min_raw": { "type": ["integer", "null"] },
         "max_raw": { "type": ["integer", "null"] },

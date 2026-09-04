@@ -263,6 +263,32 @@ Notes:
 - `slave_id=N` on read/write/wait targets the per-slave register slots maintained by the slave (group control bench).
 - `--slave-app` defaults to the bundled `ems_modbus_slave/app.py` (auto-detected next to the skill); a missing bundle or an invalid explicit path is a setup error (exit code 2). Runtime failures (spawn, timeout, process death) FAIL the current CSV.
 - The child process is force-killed at session end if `slave_stop` was not reached (logged as a warning).
+#### EC137 Fan Profile
+
+For the hp-52kw bench, the main board is connected to the runner's `--port` on RS485-1 at 115200, while the fan-bus child uses `--slave-port` on RS485-2 at 19200 8N1. Fan node IDs are 1 and 2. Select the bundled `ec137_a500_c40` profile and pass `--slave-respond-1-40` so one child answers both nodes:
+
+```text
+python skills/modbus-test/ems_modbus_slave/app.py --cli --stdio-control \\
+  --port <fan-port> --profile ec137_a500_c40 --respond-1-40
+```
+
+The hp-52kw fan sequence configures D16C=0 (signal source), D101=1 (speed-way), and D119=925 (maximum speed), then writes the target to D001. Fault reset is D000=4 (bit2). Telemetry is FC04 starting at D010 for five registers: D010 is speed raw (`rpm = raw * 925 / 64000`, integer truncation), D011 is motor status/fault, D012 is warning, D013 is voltage (`V = raw * 5 / 256`), and D014 is current (`A = raw * 0.2 / 256`). D010..D014 remain independently injectable through `slave_write`; the generic child does not derive telemetry from D001.
+
+```csv
+function,address,value,description
+slave_start,0,start,Start EC137 child on RS485-2 (--slave-profile ec137_a500_c40 --slave-respond-1-40)
+slave_write,1,"53264:32000;53265:0;53266:0;53267:1229;53268:1280;slave_id=1",Inject 1# D010..D014 raw telemetry
+slave_write,1,"53264:64000;53265:0;53266:0;53267:1280;53268:2560;slave_id=2",Inject 2# D010..D014 raw telemetry
+write,570,1,Enter board maintenance communication mode
+write,572,600,Set board fan target
+delay,0,1,Allow the board to poll both fan IDs
+write,472,32,Request EC fan fault reset through board
+slave_read,1,"53264:32000;slave_id=1",Verify injected 1# telemetry remains available
+slave_stop,0,stop,Stop EC137 child
+```
+
+`slave_write`/`slave_read` operate on the child's stdio state and do not exercise the physical fan wire. The runner's ordinary `write`, `read`, and `wait` operations exercise the board on `--port`, whose fan traffic then crosses RS485-2 to the child. The existing hp-52kw `tests/csv/fault/ec_fan_comm.csv` uses internal RAM RESPOND/TIMEOUT simulation and therefore does not prove RS485-2, node protocol frames, or D000/D001 wire behavior.
+
 
 #### Mixed Mode Example
 

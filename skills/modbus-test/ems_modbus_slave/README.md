@@ -6,9 +6,10 @@
 
 - Python + Qt（PySide6）桌面应用
 - 从 `profiles/*.json` 加载设备协议配置
-- 当前实机协议：`DM-HPWT18-U1 18一体机`
+- 当前实机协议：`顿力 EC137-A500-C40`（`profiles/ec137_a500_c40.json`，19200 8N1，FC03/04/06）
 - 通过 `USB -> RS485` 提供串口 RTU 从站服务
-- 支持功能码：`01`、`03`、`05`、`06`、`0F`、`10`
+- 支持功能码：`01`、`03`、`04`、`05`、`06`、`0F`、`10`
+
 - 寄存器/线圈点表在线编辑
 - State 状态面板，支持右键添加/移除监控点
 - Message 通信报文日志
@@ -27,6 +28,7 @@ EMS Modbus Slave/
   build_nuitka.ps1          # Windows 一键打包脚本
   profiles/
     dm_hpwt18_u1.json
+    ec137_a500_c40.json
   presets/
     dm_hpwt18_u1_ems_dhw_linkage.json
     dm_hpwt18_u1_ems_cool_linkage.json
@@ -69,6 +71,9 @@ EMS Modbus Slave/
 ## Profile 与 Preset
 
 **Profile**（`profiles/`）定义设备协议：寄存器/线圈地址、名称、读写权限、枚举、单位、串口默认值、默认 State 字段等。
+Profile 可选 `device_model`、`per_slave_addresses` 和寄存器 `register_type` 元数据。`register_type` 为 `hold` 时仅响应 FC03，为 `input` 时仅响应 FC04；访问错误寄存器空间返回非法数据地址。未声明 `per_slave_addresses` 的旧 Profile 继续使用 EMS 兼容的传统按从站隔离地址集合；声明后，集合内地址按 `(slave_id, address)` 独立保存。EC137 Profile 将 D000、D001、D010..D014、D101、D119、D16C 全部隔离，因此 `--respond-1-40` 下的 1#/2# 风机状态互不共享。
+
+EC137 的实际风机配置顺序是 D16C=0、D101=1、D119=925，目标写入 D001，遥测通过 FC04 读取 D010..D014。对 `device_model=ec_fan` 的 Profile，实际 FC06 写入 per-slave D000 且 bit2 置位时，先返回正常 FC06 回显，再清除同一节点 D011 并将 D000 恢复为 0；stdio 的 `set_register`/CSV `slave_write` 使用 `set_direct` 原始注入，不触发该副作用。
 
 **Preset**（`presets/`）定义运行场景：初始寄存器/线圈值、EMS 网页侧联动数据、启用的 Capture 点位、State 面板字段等。
 
@@ -271,12 +276,11 @@ python tools\smoke_test_profile.py
 python tools\smoke_test_message_scroll.py
 ```
 
-## 支持的 Modbus 操作
-
 | 功能码 | 说明 |
 |--------|------|
 | FC01 | Read Coils |
 | FC03 | Read Holding Registers |
+| FC04 | Read Input Registers |
 | FC05 | Write Single Coil |
 | FC06 | Write Single Register |
 | FC0F | Write Multiple Coils |
