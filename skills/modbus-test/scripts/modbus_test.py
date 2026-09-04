@@ -335,6 +335,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--port", default="auto", help="Serial port path or auto")
     parser.add_argument("--baudrate", type=int, default=115200, help="Serial baudrate")
+    parser.add_argument("--bytesize", type=int, default=8, help="Serial data bits (default: 8)")
+    parser.add_argument(
+        "--parity", choices=("N", "E", "O"), default="N", help="Serial parity (default: N)"
+    )
+    parser.add_argument(
+        "--stopbits",
+        type=float,
+        default=1,
+        help="Serial stop bits: 1, 1.5, or 2 (default: 1)",
+    )
     parser.add_argument("--slave-id", type=int, default=1, help="Modbus device_id")
     parser.add_argument(
         "--time-addr",
@@ -478,8 +488,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--wait-interval must be > 0")
     if args.session_timeout < 1:
         parser.error("--session-timeout must be >= 1")
-    if args.baudrate < 1:
-        parser.error("--baudrate must be >= 1")
+    if args.bytesize < 1:
+        parser.error("--bytesize must be >= 1")
+    if args.stopbits not in (1, 1.5, 2):
+        parser.error("--stopbits must be 1, 1.5, or 2")
     if args.slave_id < 0:
         parser.error("--slave-id must be >= 0")
     if args.time_addr < 0:
@@ -805,7 +817,13 @@ def detect_port(port_arg: str) -> str:
     return candidates[0]
 
 
-def create_client(port: str, baudrate: int) -> Any:
+def create_client(
+    port: str,
+    baudrate: int,
+    bytesize: int = 8,
+    parity: str = "N",
+    stopbits: float = 1,
+) -> Any:
     try:
         from pymodbus.client import ModbusSerialClient
     except ImportError as exc:
@@ -823,9 +841,9 @@ def create_client(port: str, baudrate: int) -> Any:
     return ModbusSerialClient(
         port=port,
         baudrate=baudrate,
-        bytesize=8,
-        parity="N",
-        stopbits=1,
+        bytesize=bytesize,
+        parity=parity,
+        stopbits=stopbits,
         timeout=DEFAULT_CLIENT_TIMEOUT_S,
     )
 
@@ -2976,10 +2994,23 @@ def main() -> int:
     if needs_serial and not args.dry_run:
         try:
             port = detect_port(args.port)
-            client = create_client(port, args.baudrate)
+            client = create_client(
+                port,
+                args.baudrate,
+                args.bytesize,
+                args.parity,
+                args.stopbits,
+            )
             if not client.connect():
                 raise ConnectionSetupError(f"failed to connect to serial port: {port}")
-            logger.info("Serial connected: port=%s baudrate=%d", port, args.baudrate)
+            logger.info(
+                "Serial connected: port=%s baudrate=%d format=%d%s%g",
+                port,
+                args.baudrate,
+                args.bytesize,
+                args.parity,
+                args.stopbits,
+            )
         except ConnectionSetupError as exc:
             logger.error("Serial connection failed: %s", exc)
             print(f"ERROR: {exc}", file=sys.stderr)

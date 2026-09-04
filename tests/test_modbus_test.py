@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import sys
+import types
 import tempfile
 import unittest
 from pathlib import Path
@@ -135,6 +136,49 @@ class InputResolutionTests(unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit):
                         MODULE.parse_args(["case.csv", option])
+
+
+class SerialFormatTests(unittest.TestCase):
+    def test_default_serial_format_is_115200_8n1(self):
+        args = MODULE.parse_args(["case.csv"])
+        self.assertEqual(args.baudrate, 115200)
+        self.assertEqual(args.bytesize, 8)
+        self.assertEqual(args.parity, "N")
+        self.assertEqual(args.stopbits, 1)
+
+    def test_compressor_serial_format_is_parseable(self):
+        args = MODULE.parse_args(
+            [
+                "case.csv",
+                "--baudrate",
+                "9600",
+                "--bytesize",
+                "8",
+                "--parity",
+                "N",
+                "--stopbits",
+                "2",
+            ]
+        )
+        self.assertEqual((args.baudrate, args.bytesize, args.parity, args.stopbits), (9600, 8, "N", 2.0))
+
+    def test_create_client_passes_explicit_serial_format(self):
+        pymodbus = types.ModuleType("pymodbus")
+        client_module = types.ModuleType("pymodbus.client")
+        constructor = mock.Mock(return_value=mock.sentinel.client)
+        client_module.ModbusSerialClient = constructor
+        pymodbus.client = client_module
+        with mock.patch.dict(sys.modules, {"pymodbus": pymodbus, "pymodbus.client": client_module}):
+            result = MODULE.create_client("/dev/ttyUSB0", 9600, 8, "N", 2)
+        self.assertIs(result, mock.sentinel.client)
+        constructor.assert_called_once_with(
+            port="/dev/ttyUSB0",
+            baudrate=9600,
+            bytesize=8,
+            parity="N",
+            stopbits=2,
+            timeout=MODULE.DEFAULT_CLIENT_TIMEOUT_S,
+        )
 
 
 class SimulatorAvailabilityTests(unittest.TestCase):

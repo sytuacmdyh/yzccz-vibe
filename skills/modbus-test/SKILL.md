@@ -24,6 +24,9 @@ The user may provide:
 - **paths** (required): Either one CSV directory or one or more CSV file paths. Directory and file-list modes cannot be mixed.
 - **--port**: Serial port (default: auto-detect)
 - **--baudrate**: Baud rate (default: 115200)
+- **--bytesize**: Serial data bits (default: 8)
+- **--parity**: Serial parity `N`, `E`, or `O` (default: `N`)
+- **--stopbits**: Serial stop bits `1`, `1.5`, or `2` (default: `1`)
 - **--slave-id**: Modbus slave ID (default: 1)
 - **--time-addr**: Device logic time register address (default: 4399)
 - **--session-timeout**: Maximum run time in seconds for the whole session (default: 120)
@@ -288,6 +291,51 @@ slave_stop,0,stop,Stop EC137 child
 ```
 
 `slave_write`/`slave_read` operate on the child's stdio state and do not exercise the physical fan wire. The runner's ordinary `write`, `read`, and `wait` operations exercise the board on `--port`, whose fan traffic then crosses RS485-2 to the child. The existing hp-52kw `tests/csv/fault/ec_fan_comm.csv` uses internal RAM RESPOND/TIMEOUT simulation and therefore does not prove RS485-2, node protocol frames, or D000/D001 wire behavior.
+
+#### Compressor Inverter V2.4 Profile
+
+This profile is only for the heat-pump compressor inverter bus, not the fan protocol. The hp-52kw firmware uses inverter node IDs 1 and 2 on `RS485_3`/USART2. Use `compressor_inverter_v24` for the inverter-side child and `--slave-respond-1-40` to keep ID 1 and ID 2 state isolated while allowing both nodes:
+
+```text
+python skills/modbus-test/ems_modbus_slave/app.py --cli --stdio-control \
+  --port <inverter-port> --profile compressor_inverter_v24 --respond-1-40
+```
+
+The firmware bus format is **9600 8N2**. Configure the ordinary runner with `--baudrate 9600 --bytesize 8 --parity N --stopbits 2`; `--slave-baudrate`, when supplied, overrides only the child baudrate, while the child's parity and stop bits come from its Profile. The firmware reads FC03 from `0x6005` for 18 words (`0x6005..0x6016`); undefined gaps return zero. It writes FC06 to `0x8001` (frequency setpoint, wire value `Hz × 10`, range `0..32767`) and `0x8000` (`0x0401` start, `0x0000` stop, `0x0004` fault reset). A reset is an explicit sequence `0x8000=4`, then `0x8000=0`; the simulator does not synthesize state or clear the reset value automatically.
+
+Profile register raw units: `0x6005` bus voltage (1 V), `0x6006` output frequency (0.1 Hz), `0x6008` output current (0.1 A), `0x6009` output torque (0.1%), `0x600A` output voltage (1 V), `0x600B` output power (0.1 kW), `0x600F` fault code, `0x6016` signed 16-bit inverter temperature. `0x8000` is the control word and `0x8001` is the frequency setpoint; all values remain standard 16-bit big-endian wire words. `slave_write` is only a stdio raw injection and bypasses register write permissions; it does not exercise the physical inverter wire.
+
+The PDF's example uses 8N1 and a 12-word FC03 read. That differs from the current firmware's 8N2 and fixed 18-word FC03 frame; this Profile and runner example follow the firmware implementation. If a field inverter is confirmed to require 8N1, pass `--stopbits 1` to the runner and change the Profile metadata accordingly without changing the register/frame model.
+
+Complete CSV operation example (ordinary `write`/`read`/`wait` exercise the board-side physical bus; `slave_write` injects the inverter-side values):
+
+```csv
+function,address,value,description
+slave_start,0,start,Start compressor child on RS485-3 with compressor_inverter_v24
+slave_write,1,"24581:700;24582:123;24584:456;24585:78;24586:380;24587:250;24591:0;24598:65456;slave_id=1",Inject ID1 inverter status raw values
+slave_write,1,"24581:701;24582:124;24584:457;24585:79;24586:381;24587:251;24591:0;24598:65457;slave_id=2",Inject ID2 inverter status raw values
+write,32769,1200,Set ID1 frequency to 120.0 Hz on the physical bus
+write,32768,1025,Start ID1 with control word 0x0401
+read,32769,1200,Verify ID1 setpoint through the physical bus
+wait,24582,123,Wait for ID1 output-frequency telemetry
+set_slave,0,2,Select inverter ID2
+write,32769,800,Set ID2 frequency to 80.0 Hz on the physical bus
+read,32769,800,Verify ID2 setpoint through the physical bus
+set_slave,0,1,Select inverter ID1
+write,32768,4,Issue explicit ID1 fault reset
+write,32768,0,Explicitly clear ID1 reset control word
+slave_stop,0,stop,Stop compressor child
+```
+
+Use the same runner command for that CSV:
+
+```text
+python skills/modbus-test/scripts/modbus_test.py <compressor.csv> \
+  --port <board-port> --baudrate 9600 --bytesize 8 --parity N --stopbits 2 \
+  --slave-port <inverter-port> --slave-profile compressor_inverter_v24 --slave-respond-1-40
+```
+
+
 
 
 #### Mixed Mode Example

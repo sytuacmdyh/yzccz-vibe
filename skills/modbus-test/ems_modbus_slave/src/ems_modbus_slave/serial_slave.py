@@ -103,16 +103,20 @@ class SerialSlaveServer:
             self._serial = serial.Serial(
                 port=self._port,
                 baudrate=self._baudrate,
-                bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
+                bytesize=self.profile.serial_bytesize,
+                parity=self.profile.serial_parity,
+                stopbits=self.profile.serial_stopbits,
                 timeout=0.05,
             )
             if self._respond_id_min is None or self._respond_id_max is None:
                 id_text = f"slave_id={self._slave_id}"
             else:
                 id_text = f"slave_id_range={self._respond_id_min}-{self._respond_id_max}"
-            self.log_fn(f"Serial started: port={self._port}, baudrate={self._baudrate}, {id_text}")
+            self.log_fn(
+                f"Serial started: port={self._port}, baudrate={self._baudrate}, "
+                f"format={self.profile.serial_bytesize}{self.profile.serial_parity}"
+                f"{self.profile.serial_stopbits:g}, {id_text}"
+            )
         except SerialException as exc:
             self.log_fn(f"Failed to open serial port: {exc}")
             self.message_fn(f"串口打开失败：{exc}", "error")

@@ -131,6 +131,9 @@ class DeviceProfile:
         raw_data: Dict[str, object] | None = None,
         device_model: str = "",
         per_slave_addresses: Iterable[int] | None = None,
+        serial_bytesize: int = 8,
+        serial_parity: str = "N",
+        serial_stopbits: float = 1,
     ) -> None:
         self.profile_id = profile_id
         self.name = name
@@ -139,6 +142,9 @@ class DeviceProfile:
         self._raw_data = deepcopy(raw_data) if raw_data is not None else None
         self.slave_id = slave_id
         self.baudrate = baudrate
+        self.serial_bytesize = serial_bytesize
+        self.serial_parity = serial_parity.upper()
+        self.serial_stopbits = serial_stopbits
         self.function_codes = list(function_codes)
         self.registers = registers
         self.coils = coils
@@ -165,6 +171,9 @@ class DeviceProfile:
             description=str(data.get("description", "")),
             slave_id=int(data.get("slave_id", 1)),
             baudrate=int(data.get("baudrate", 115200)),
+            serial_bytesize=int(data.get("serial", {}).get("bytesize", 8)),
+            serial_parity=str(data.get("serial", {}).get("parity", "N")).upper(),
+            serial_stopbits=float(data.get("serial", {}).get("stopbits", 1)),
             function_codes=data.get("function_codes", [3, 6, 16]),
             registers=registers,
             coils=coils,
@@ -187,6 +196,11 @@ class DeviceProfile:
             "description": self.description,
             "slave_id": self.slave_id,
             "baudrate": self.baudrate,
+            "serial": {
+                "bytesize": self.serial_bytesize,
+                "parity": self.serial_parity,
+                "stopbits": self.serial_stopbits,
+            },
             "function_codes": list(self.function_codes),
             "startup_preset": self.startup_preset,
             "status_fields": deepcopy(self.status_fields),

@@ -9,14 +9,12 @@ import sys
 import time
 from pathlib import Path
 
-from serial.tools import list_ports
 
 from .device_profile import DeviceProfile
 from .paths import app_root
 from .preset_loader import SimulatorPreset, load_startup_preset
 from .profile_repository import discover_profiles
 from .register_model import RegisterBank
-from .serial_slave import SerialSlaveServer
 from .stdio_control import StdioControlServer, emit_json, log_event
 
 
@@ -90,6 +88,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from serial.tools import list_ports
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -144,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         def startup_log(message: str) -> None:
             _log_line(message)
 
+    from .serial_slave import SerialSlaveServer
     server = SerialSlaveServer(
         profile=profile,
         bank=bank,
