@@ -99,6 +99,12 @@ class SerialSlaveServer:
         self._serial = None
 
     def _run(self) -> None:
+        bits_per_char = (
+            1 + self.profile.serial_bytesize
+            + (self.profile.serial_parity != "N") + self.profile.serial_stopbits
+        )
+        # RTU t3.5; above 19200 baud the specification uses a fixed 1.75 ms.
+        frame_gap = 3.5 * bits_per_char / self._baudrate if self._baudrate <= 19200 else 0.00175
         try:
             self._serial = serial.Serial(
                 port=self._port,
@@ -106,7 +112,7 @@ class SerialSlaveServer:
                 bytesize=self.profile.serial_bytesize,
                 parity=self.profile.serial_parity,
                 stopbits=self.profile.serial_stopbits,
-                timeout=0.05,
+                timeout=frame_gap,
             )
             if self._respond_id_min is None or self._respond_id_max is None:
                 id_text = f"slave_id={self._slave_id}"
@@ -126,7 +132,7 @@ class SerialSlaveServer:
         last_byte_ts = 0.0
         while not self._stop_event.is_set():
             try:
-                incoming = self._serial.read(256)
+                incoming = self._serial.read(self._serial.in_waiting or 1)
             except SerialException as exc:
                 self.log_fn(f"Serial read error: {exc}")
                 self.message_fn(f"串口读取错误：{exc}", "error")
@@ -136,7 +142,7 @@ class SerialSlaveServer:
                 rx.extend(incoming)
                 last_byte_ts = time.monotonic()
 
-            if rx and (time.monotonic() - last_byte_ts) > 0.02:
+            if rx and (time.monotonic() - last_byte_ts) >= frame_gap:
                 frame = bytes(rx)
                 rx.clear()
                 self._handle_frame(frame)
