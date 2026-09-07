@@ -43,6 +43,7 @@ FUNC_SIM_WAIT = "sim_wait"
 FUNC_SET_SLAVE = "set_slave"
 FUNC_SLAVE_START = "slave_start"
 FUNC_SLAVE_STOP = "slave_stop"
+FUNC_SLAVE_ENABLE = "slave_enable"
 FUNC_SLAVE_WRITE = "slave_write"
 FUNC_SLAVE_READ = "slave_read"
 FUNC_SLAVE_WAIT = "slave_wait"
@@ -56,6 +57,7 @@ SIM_FUNCS = {FUNC_SIM_CONTROL, FUNC_SIM_POWER, FUNC_SIM_READ, FUNC_SIM_WAIT}
 SLAVE_FUNCS = {
     FUNC_SLAVE_START,
     FUNC_SLAVE_STOP,
+    FUNC_SLAVE_ENABLE,
     FUNC_SLAVE_WRITE,
     FUNC_SLAVE_READ,
     FUNC_SLAVE_WAIT,
@@ -740,6 +742,11 @@ def parse_csv(csv_path: Path, encoding: str) -> list[Step]:
             elif func in (FUNC_SLAVE_START, FUNC_SLAVE_STOP):
                 if addr != 0:
                     raise CsvParseError(f"row {row_num}: {func} requires address 0")
+            elif func == FUNC_SLAVE_ENABLE:
+                if not 1 <= addr <= 247:
+                    raise CsvParseError(f"row {row_num}: slave_enable requires slave id 1-247")
+                if value_text not in ("0", "1"):
+                    raise CsvParseError(f"row {row_num}: slave_enable requires value 0 or 1")
             elif func == FUNC_SLAVE_WRITE:
                 _parse_slave_write_spec(value_text, row_num)
             elif func == FUNC_SLAVE_READ:
@@ -2492,6 +2499,19 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
         except SlaveControlError as exc:
             return StepResult(index, step.func, "FAIL", summary, str(exc))
 
+    if step.func == FUNC_SLAVE_ENABLE:
+        enabled = step.value == "1"
+        summary = f"slave_enable slave_id={step.addr} enabled={int(enabled)}"
+        if ctx.dry_run:
+            return StepResult(index, step.func, "PASS", summary)
+        if ctx.slave is None or not ctx.slave.started:
+            return StepResult(index, step.func, "FAIL", summary, "slave not started")
+        try:
+            slave_command(ctx.slave, "set_enabled", slave_id=step.addr, enabled=enabled)
+            return StepResult(index, step.func, "PASS", summary)
+        except SlaveControlError as exc:
+            return StepResult(index, step.func, "FAIL", summary, str(exc))
+
     if step.func == FUNC_SLAVE_WRITE:
         pairs, slave_id = _parse_slave_write_spec(step.value, step.row_num)
         summary = "slave_write dev={} {}".format(
@@ -3072,12 +3092,20 @@ def main() -> int:
             elif ctx.session_deadline is not None and time.monotonic() >= ctx.session_deadline:
                 result = make_file_result(prepared, "skip", "session timeout")
             else:
-                result = run_file(
-                    prepared.input_file.path,
-                    steps or [],
-                    ctx,
-                    display_name=prepared.input_file.display_name,
-                )
+                try:
+                    result = run_file(
+                        prepared.input_file.path,
+                        steps or [],
+                        ctx,
+                        display_name=prepared.input_file.display_name,
+                    )
+                finally:
+                    if slave_ctx is not None and slave_ctx.started and slave_ctx.proc is not None:
+                        logger.warning("Slave still running at file end; force stopping")
+                        slave_kill(slave_ctx)
+                    if mqtt_ctx is not None and mqtt_ctx.started and mqtt_ctx.proc is not None:
+                        logger.warning("MQTT daemon still running at file end; force stopping")
+                        mqtt_kill(mqtt_ctx)
             results.append(result)
             print_file_result(index, len(prepared_files), result)
     finally:

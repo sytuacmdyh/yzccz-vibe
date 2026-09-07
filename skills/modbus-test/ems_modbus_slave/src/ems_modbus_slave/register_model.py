@@ -75,6 +75,7 @@ class RegisterBank:
         self._lock = threading.RLock()
         self._values = self._build_default_values()
         self._per_slave_values: Dict[tuple[int, int], int] = {}
+        self._silent_nodes: set[int] = set()
         if preset is not None:
             self._apply_preset_unlocked(preset)
 
@@ -142,6 +143,7 @@ class RegisterBank:
         with self._lock:
             self._values = self._build_default_values()
             self._per_slave_values = {}
+            self._silent_nodes.clear()
             if self._preset is not None:
                 self._apply_preset_unlocked(self._preset)
 
@@ -156,6 +158,17 @@ class RegisterBank:
             if coil is None:
                 continue
             self._set_coil_value(coil, value)
+
+    def set_enabled(self, slave_id: int, enabled: bool) -> None:
+        if not 1 <= slave_id <= 247:
+            raise ValueError("slave_id must be 1-247")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        with self._lock:
+            if enabled:
+                self._silent_nodes.discard(slave_id)
+            else:
+                self._silent_nodes.add(slave_id)
 
     def get(self, address: int, slave_id: int | None = None) -> int:
         with self._lock:
@@ -287,6 +300,8 @@ class RegisterBank:
 
     def handle_request(self, frame: bytes, slave_id: int) -> bytes | None:
         with self._lock:
+            if slave_id in self._silent_nodes:
+                return None
             return self._handle_request_locked(frame, slave_id)
 
     def _handle_request_locked(self, frame: bytes, slave_id: int) -> bytes | None:

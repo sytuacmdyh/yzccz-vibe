@@ -132,6 +132,7 @@ read,4250,350,Verify target temp
 | `logic_delay` | Poll device logic time register until elapsed seconds; address=0 uses `--time-addr`; **device logic time** |
 | `slave_start` | Launch the EMS Modbus Slave child process (`app.py --cli --stdio-control`) with `--slave-*` settings; address=0; waits for the ready event |
 | `slave_stop` | Gracefully stop the slave child process (shutdown command, kill fallback); address=0 |
+| `slave_enable` | Enable/disable a simulated node's RTU responses via stdio; address=Modbus slave ID (1–247), value=`0` (disable) or `1` (enable); requires `slave_start` |
 | `slave_write` | Write slave register(s) via the stdio control channel; address=DeviceIndex(>0), value=`addr:value[;addr:value][;slave_id=N]` (register injection bypasses writable restrictions) |
 | `slave_read` | Read slave register and compare; address=DeviceIndex(>0), value=`addr:expected[;slave_id=N]` (exact/range/bit) |
 | `slave_wait` | Poll slave register until match or timeout; address=DeviceIndex(>0), value=`addr:expected[;timeout=N][;interval=M][;slave_id=N]` |
@@ -267,6 +268,19 @@ Notes:
 - `slave_id=N` on read/write/wait targets the per-slave register slots maintained by the slave (group control bench).
 - `--slave-app` defaults to the bundled `ems_modbus_slave/app.py` (auto-detected next to the skill); a missing bundle or an invalid explicit path is a setup error (exit code 2). Runtime failures (spawn, timeout, process death) FAIL the current CSV.
 - The child process is force-killed at session end if `slave_stop` was not reached (logged as a warning).
+
+#### Per-node RTU Response Control
+
+Use `slave_enable` to control whether a simulated node responds to actual RTU requests. No custom `--slave-app` or project adapter is required.
+
+```csv
+slave_enable,1,0,Disable node 1 RTU responses
+slave_enable,1,1,Restore node 1 responses without clearing telemetry
+slave_enable,2,0,Disable node 2 independently
+```
+
+The address column is the **Modbus slave ID (1–247)**, not DeviceIndex. The value must be `0` (disable) or `1` (enable). The runner sends the stdio command `set_enabled` with `slave_id` and boolean `enabled`, and waits for its acknowledgement. No Modbus control frame or special register is involved. Disabled nodes ignore RTU reads and writes; other nodes remain online, the serial port stays open, and register data is retained. New children and `reset_defaults` restore all nodes to responding. Register address `65535` has no special meaning; the former register-control interface is removed.
+
 #### EC137 Fan Profile
 
 For the hp-52kw bench, the main board is connected to the runner's `--port` on RS485-1 at 115200, while the fan-bus child uses `--slave-port` on RS485-2 at 19200 8N1. Fan node IDs are 1 and 2. Select the bundled `ec137_a500_c40` profile and pass `--slave-respond-1-40` so one child answers both nodes:
