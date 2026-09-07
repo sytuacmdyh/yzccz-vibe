@@ -72,10 +72,11 @@ The user may provide:
    Add `--dry-run`, `--time-addr`, or other supported connection/time options if requested.
    Add `--sim-api http://127.0.0.1:9090` when CSV contains `sim_*` operations.
    No `--slave-app` needed: the EMS Modbus Slave ships with this skill at `$SKILL_ROOT/ems_modbus_slave/app.py` and is auto-detected. Only pass `--slave-app <path>` (plus `--slave-port`, `--slave-preset`, etc. as needed) when a CSV contains `slave_*` operations and a different slave copy is wanted.
-   When a CSV contains `mqtt_*` operations, the `ems_mqtt_master` daemon (which depends on `paho-mqtt`, `PySide6`, `websocket-client`) is spawned. Add these to the `uv run --with` list so the daemon can import them:
+   The skill runs entirely through CLI, stdio JSON-RPC, and HTTP. Neither `slave_*` nor `mqtt_*` requires PySide6 or a desktop environment. The bundled GUI entry points are optional and are not used by the skill.
+   When a CSV contains `mqtt_*` operations, the `ems_mqtt_master` daemon (which depends on `paho-mqtt` and `websocket-client`) is spawned. Add these to the `uv run --with` list so the daemon can import them:
    ```bash
    uv run --with "pymodbus>=3.0,<4.0" --with "pyserial>=3.5,<4.0" \
-     --with "paho-mqtt" --with "PySide6" --with "websocket-client" \
+     --with "paho-mqtt>=2.0,<3" --with "websocket-client>=1.7" \
      "$SKILL_ROOT/scripts/modbus_test.py" <file.csv> --mqtt-config <broker-config.json>
    ```
    No `--mqtt-app` needed: the EMS MQTT master ships with this skill at `$SKILL_ROOT/ems_mqtt_master/app_cli.py` and is auto-detected. Only pass `--mqtt-app <path>` (plus `--mqtt-config` as needed) when a CSV contains `mqtt_*` operations and a different master copy is wanted.
@@ -242,7 +243,7 @@ Notes:
 - The daemon auto-refreshes time fields for `NO_ACK`/time-sync methods before sending.
 - `--mqtt-app` defaults to the bundled `ems_mqtt_master/app_cli.py` (auto-detected next to the skill); a missing bundle or an invalid explicit path is a setup error (exit code 2). Runtime failures (spawn, connect, timeout) FAIL the current CSV.
 - The daemon is force-killed at session end if `mqtt_stop` was not reached (logged as a warning).
-- The daemon needs `paho-mqtt`, `PySide6`, and `websocket-client` installed (add them to the `uv run --with` list).
+- The daemon needs `paho-mqtt` and `websocket-client` installed (add them to the `uv run --with` list). It uses ordinary Python callbacks and threading, not Qt.
 
 ### EMS Modbus Slave Operations
 

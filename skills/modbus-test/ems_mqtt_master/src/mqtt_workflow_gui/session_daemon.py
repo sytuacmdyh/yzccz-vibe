@@ -27,10 +27,8 @@ import threading
 import time
 from typing import Any
 
-from PySide6.QtCore import Qt
-
 from .config import load_config
-from .mqtt_worker import MqttSession, SignalBus
+from .mqtt_worker import MqttSession, SessionCallbacks
 from .time_fields import NO_ACK_METHODS, TIME_SYNC_METHODS, refresh_time_fields
 
 _OUT_LOCK = threading.Lock()
@@ -54,7 +52,7 @@ def _load_config_quiet() -> dict[str, Any]:
 
 
 class _MqttBridge:
-    """封装 MqttSession + SignalBus，把接收消息与 ack 收集到线程安全列表。"""
+    """封装 MQTT 会话回调，把接收消息与 ack 收集到线程安全列表。"""
 
     def __init__(self) -> None:
         self.session: MqttSession | None = None
@@ -64,7 +62,7 @@ class _MqttBridge:
         self._connect_result: dict[str, Any] = {}
 
     def connect(self, cfg: dict[str, Any], connect_timeout: int) -> tuple[bool, str]:
-        bus = SignalBus()
+        bus = SessionCallbacks()
 
         def on_connected(ok: bool, detail: str) -> None:
             self._connect_result["ok"] = ok
@@ -85,9 +83,9 @@ class _MqttBridge:
             with _LOCK:
                 self.acks.append((rid, method, code))
 
-        bus.connected.connect(on_connected, Qt.DirectConnection)
-        bus.message_received.connect(on_message, Qt.DirectConnection)
-        bus.ack_received.connect(on_ack, Qt.DirectConnection)
+        bus.connected = on_connected
+        bus.message_received = on_message
+        bus.ack_received = on_ack
 
         session = MqttSession(
             bus=bus,

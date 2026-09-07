@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QPoint, QSize, QTimer, Qt
+from PySide6.QtCore import QObject, Signal, QPoint, QSize, QTimer, Qt
 from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -44,12 +44,22 @@ from ..config import (
     merge_and_save,
     save_last_params,
 )
-from ..mqtt_worker import MqttSession, SignalBus, describe_code
+from ..mqtt_worker import MqttSession, SessionCallbacks, describe_code
 from ..time_fields import NO_ACK_METHODS, TIME_SYNC_METHODS, refresh_time_fields
 from .envelope_sync import EnvelopeSyncMixin
 from .param_form import ParamFormMixin
 from .preset_dialog import PresetMixin
 from .workflow_preview import WorkflowPreviewPanel
+
+
+class SignalBus(QObject):
+    """将 MQTT worker 通知通过 Qt 队列连接转发到 UI 线程。"""
+
+    connected = Signal(bool, str)
+    disconnected = Signal(str)
+    message_received = Signal(str, str)
+    ack_received = Signal(object, str, int)
+    log = Signal(str)
 
 
 class MainWindow(QMainWindow, EnvelopeSyncMixin, ParamFormMixin, PresetMixin):
@@ -363,7 +373,13 @@ class MainWindow(QMainWindow, EnvelopeSyncMixin, ParamFormMixin, PresetMixin):
         if self.session is not None:
             self.disconnect_broker()
         self.session = MqttSession(
-            bus=self.bus,
+            bus=SessionCallbacks(
+                connected=self.bus.connected.emit,
+                disconnected=self.bus.disconnected.emit,
+                message_received=self.bus.message_received.emit,
+                ack_received=self.bus.ack_received.emit,
+                log=self.bus.log.emit,
+            ),
             host=cfg["host"],
             port=cfg["port"],
             path=cfg["path"],

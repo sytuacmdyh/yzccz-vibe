@@ -21,10 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt
-
 from .config import ConfigError, load_config, load_code_legend
-from .mqtt_worker import MqttSession, SignalBus, describe_code
+from .mqtt_worker import MqttSession, SessionCallbacks, describe_code
 from .time_fields import NO_ACK_METHODS, TIME_SYNC_METHODS, refresh_time_fields
 
 EXIT_OK = 0
@@ -133,7 +131,7 @@ def build_envelope(args: argparse.Namespace) -> dict[str, Any]:
 
 # ── 连接与会话 ─────────────────────────────────────────────────────
 
-def _make_session(cfg: dict[str, Any], bus: SignalBus, session_cls: Any) -> Any:
+def _make_session(cfg: dict[str, Any], bus: SessionCallbacks, session_cls: Any) -> Any:
     return session_cls(
         bus=bus,
         host=cfg["host"],
@@ -147,8 +145,8 @@ def _make_session(cfg: dict[str, Any], bus: SignalBus, session_cls: Any) -> Any:
     )
 
 
-def _connect(session: Any, bus: SignalBus, connect_timeout: int) -> tuple[bool, str]:
-    """启动会话并等待 connected 信号（DirectConnection，无需事件循环）。"""
+def _connect(session: Any, bus: SessionCallbacks, connect_timeout: int) -> tuple[bool, str]:
+    """启动会话并等待连接回调，无需 Qt 或事件循环。"""
     done = threading.Event()
     result: dict[str, Any] = {}
 
@@ -157,7 +155,7 @@ def _connect(session: Any, bus: SignalBus, connect_timeout: int) -> tuple[bool, 
         result["detail"] = detail
         done.set()
 
-    bus.connected.connect(on_connected, Qt.DirectConnection)
+    bus.connected = on_connected
     session.start()
     if not done.wait(connect_timeout):
         return False, "连接超时"
@@ -190,24 +188,18 @@ def run_send(args: argparse.Namespace, session_cls: Any = MqttSession) -> int:
         print(f"错误: {exc}", file=sys.stderr, flush=True)
         return EXIT_USAGE
 
-    bus = SignalBus()
+    bus = SessionCallbacks()
     session = _make_session(cfg, bus, session_cls)
     received: list[str] = []
     ack_list: list[tuple[str, str, int]] = []
     reported: set[tuple[str, str, int]] = set()
     disconnected = threading.Event()
 
-    bus.message_received.connect(
-        lambda topic, text: received.append(
-            f"[{_stamp()}] 收到 <{_redact_topic(topic)}>: {_fmt_message(text)}"
-        ),
-        Qt.DirectConnection,
+    bus.message_received = lambda topic, text: received.append(
+        f"[{_stamp()}] 收到 <{_redact_topic(topic)}>: {_fmt_message(text)}"
     )
-    bus.ack_received.connect(
-        lambda rid, method, code: ack_list.append((str(rid), method, code)),
-        Qt.DirectConnection,
-    )
-    bus.disconnected.connect(lambda _reason: disconnected.set(), Qt.DirectConnection)
+    bus.ack_received = lambda rid, method, code: ack_list.append((str(rid), method, code))
+    bus.disconnected = lambda _reason: disconnected.set()
 
     ok, detail = _connect(
         session,
@@ -293,17 +285,18 @@ def run_watch(args: argparse.Namespace, session_cls: Any = MqttSession) -> int:
         )
         return EXIT_USAGE
 
-    bus = SignalBus()
+    bus = SessionCallbacks()
     session = _make_session(cfg, bus, session_cls)
     disconnected = threading.Event()
-    bus.message_received.connect(
-        lambda topic, text: _out(f"收到 <{_redact_topic(topic)}>: {_fmt_message(text)}"),
-        Qt.DirectConnection,
+    bus.message_received = lambda topic, text: _out(
+        f"收到 <{_redact_topic(topic)}>: {_fmt_message(text)}"
     )
-    bus.disconnected.connect(
-        lambda reason: (disconnected.set(), _out(f"连接断开: {reason}")),
-        Qt.DirectConnection,
-    )
+
+    def on_disconnected(reason: str) -> None:
+        disconnected.set()
+        _out(f"连接断开: {reason}")
+
+    bus.disconnected = on_disconnected
 
     ok, detail = _connect(
         session,

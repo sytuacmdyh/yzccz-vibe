@@ -2,6 +2,10 @@
 
 面向 EMS 联调的 Modbus RTU 从站桌面模拟器。
 
+Modbus test 技能仅使用 `app.py --cli --stdio-control`，无需 PySide6 或桌面环境。
+在本目录运行 `pip install "pyserial>=3.5,<4"` 即可使用 CLI；例如 `python app.py --cli --help`。
+仅启动可选 GUI 时需要 `pip install -r requirements.txt` 安装含 PySide6 的完整依赖。
+
 ## 功能概览
 
 - Python + Qt（PySide6）桌面应用

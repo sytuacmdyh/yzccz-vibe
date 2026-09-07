@@ -5,11 +5,18 @@
 
 ## 运行
 
+在本技能捆绑的 `ems_mqtt_master` 目录运行：
+
 ```powershell
-pip install -r tools\mqtt_workflow_gui\requirements.txt
-python tools\mqtt_workflow_gui\app.py          # GUI
-python tools\mqtt_workflow_gui\app_cli.py -h  # 无 GUI 命令行（脚本/联调调用）
+pip install "paho-mqtt>=2.0,<3" "websocket-client>=1.7"
+python app_cli.py -h                 # CLI / stdio daemon，无需 Qt
+
+# 仅使用可选桌面 UI 时：
+pip install -r requirements.txt     # 包含 PySide6
+python app.py
 ```
+
+Modbus test 技能仅使用 CLI daemon。MQTT worker 使用不依赖 Qt 的普通回调；可选 GUI 将回调适配为 Qt 信号，转发到 UI 线程。
 
 ## CLI（app_cli.py）
 

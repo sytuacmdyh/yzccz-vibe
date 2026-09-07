@@ -1,16 +1,17 @@
-"""MQTT 后台线程封装：连接、订阅、发布，回调通过 Qt 信号回到 UI 线程。
+"""MQTT 后台线程封装：连接、订阅、发布，不依赖 GUI。
 
-线程模型：连接与 paho loop 跑在独立的 daemon 线程里；回调信号由 Qt
-队列连接转发到 UI 线程，相关对象始终在主线程创建。
+连接与 paho loop 跑在 daemon 线程里，回调在该线程同步执行。
+CLI 自行同步共享状态；GUI 通过 Qt 信号将通知转发到 UI 线程。
 """
 from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import paho.mqtt.client as mqtt
-from PySide6.QtCore import QObject, Signal
 
 from .config import load_code_legend
 
@@ -28,14 +29,15 @@ def describe_code(code: int | None, legend: list[tuple[int, str]] | None = None)
     return f"未知 code={code}"
 
 
-class SignalBus(QObject):
-    """跨线程信号总线（worker 线程 emit，主线程接收）。"""
+@dataclass
+class SessionCallbacks:
+    """启动前设置回调；未订阅的通知被忽略，回调不得阻塞网络线程。"""
 
-    connected = Signal(bool, str)          # ok, detail
-    disconnected = Signal(str)            # reason
-    message_received = Signal(str, str)   # topic, payload
-    ack_received = Signal(object, str, int)  # request_id(str/int), method, code
-    log = Signal(str)
+    connected: Callable[[bool, str], None] = lambda _ok, _detail: None
+    disconnected: Callable[[str], None] = lambda _reason: None
+    message_received: Callable[[str, str], None] = lambda _topic, _payload: None
+    ack_received: Callable[[object, str, int], None] = lambda _rid, _method, _code: None
+    log: Callable[[str], None] = lambda _text: None
 
 
 class MqttSession:
@@ -43,7 +45,7 @@ class MqttSession:
 
     def __init__(
         self,
-        bus: SignalBus,
+        bus: SessionCallbacks,
         host: str,
         port: int,
         path: str,
@@ -131,7 +133,7 @@ class MqttSession:
             try:
                 client.tls_set()
             except Exception as exc:
-                self.bus.connected.emit(False, f"TLS 初始化失败: {exc}")
+                self.bus.connected(False, f"TLS 初始化失败: {exc}")
                 return
         client.username_pw_set(self.username, self.password)
         client.on_connect = self._on_connect
@@ -142,8 +144,8 @@ class MqttSession:
         try:
             client.connect(self.host, self.port, keepalive=60)
         except Exception as exc:
-            self.bus.connected.emit(False, f"连接失败: {exc}")
-            self.bus.log.emit(f"连接失败: {exc}")
+            self.bus.connected(False, f"连接失败: {exc}")
+            self.bus.log(f"连接失败: {exc}")
             return
         client.loop_forever()
 
@@ -151,8 +153,8 @@ class MqttSession:
         ok = not getattr(reason_code, "is_failure", False)
         if not ok:
             self._connected.clear()
-            self.bus.connected.emit(False, f"rc={reason_code}")
-            self.bus.log.emit(f"连接被拒: rc={reason_code}，已停止重连，请检查用户名/密码/证书")
+            self.bus.connected(False, f"rc={reason_code}")
+            self.bus.log(f"连接被拒: rc={reason_code}，已停止重连，请检查用户名/密码/证书")
             try:
                 client.disconnect()
             except Exception:
@@ -170,9 +172,9 @@ class MqttSession:
         if self.subscribe_all:
             client.subscribe("up/+/+", qos=1)
         client.subscribe(f"{up_topic}/log", qos=0)
-        self.bus.connected.emit(True, up_topic)
-        self.bus.log.emit(f"已订阅: {up_topic} / {up_topic}/log(调试流)")
-        self.bus.log.emit(f"已连接: {self.host}:{self.port}{self.path}")
+        self.bus.connected(True, up_topic)
+        self.bus.log(f"已订阅: {up_topic} / {up_topic}/log(调试流)")
+        self.bus.log(f"已连接: {self.host}:{self.port}{self.path}")
 
     def _on_subscribe(self, _client, _userdata, _mid, reason_codes, _properties) -> None:
         failed = [
@@ -182,14 +184,14 @@ class MqttSession:
             or (not isinstance(rc, int) and getattr(rc, "is_failure", False))
         ]
         if failed:
-            self.bus.log.emit(f"MQTT 订阅被拒绝: {failed}")
+            self.bus.log(f"MQTT 订阅被拒绝: {failed}")
 
     def _on_disconnect(self, _client, _userdata, _flags, reason_code, _properties) -> None:
         if self._stopped.is_set():
             return
         self._connected.clear()
-        self.bus.disconnected.emit(f"rc={reason_code}")
-        self.bus.log.emit(f"MQTT 断开: rc={reason_code}")
+        self.bus.disconnected(f"rc={reason_code}")
+        self.bus.log(f"MQTT 断开: rc={reason_code}")
 
     def _on_message(self, _client, _userdata, message) -> None:
         if self._stopped.is_set():
@@ -198,7 +200,7 @@ class MqttSession:
             text = message.payload.decode("utf-8", errors="replace")
         except Exception:
             return
-        self.bus.message_received.emit(message.topic, text)
+        self.bus.message_received(message.topic, text)
         try:
             data: Any = json.loads(text)
         except Exception:
@@ -216,4 +218,4 @@ class MqttSession:
             code = int(raw_code)
         except (TypeError, ValueError):
             return
-        self.bus.ack_received.emit(req_id, method, code)
+        self.bus.ack_received(req_id, method, code)
