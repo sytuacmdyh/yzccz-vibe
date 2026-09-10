@@ -307,6 +307,12 @@ slave_stop,0,stop,Stop EC137 child
 
 `slave_write`/`slave_read` operate on the child's stdio state and do not exercise the physical fan wire. The runner's ordinary `write`, `read`, and `wait` operations exercise the board on `--port`, whose fan traffic then crosses RS485-2 to the child. The existing hp-52kw `tests/csv/fault/ec_fan_comm.csv` uses internal RAM RESPOND/TIMEOUT simulation and therefore does not prove RS485-2, node protocol frames, or D000/D001 wire behavior.
 
+#### Rujing Compressor Inverter V1.3 Profile
+
+Select `--slave-profile rujing_compressor_inverter_v13` for the Rujing compressor protocol: **4800 8N1**, FC03/06/16, FC03 limited to 50 registers per request. All CSV/stdio addresses are **document address minus one** (frequency setpoint: 1999; control word: 2000; status starts at 2099). Telemetry and faults are manually injected and remain independent of control writes. Fan A/B points are excluded.
+
+For raw units, node isolation, protocol examples and a runnable two-adapter CSV, read [Rujing V1.3 usage](ems_modbus_slave/docs/rujing_compressor_inverter_v13.md). Its ordinary CSV reads/writes directly target the inverter protocol; board integration requires the board's own upstream addresses and serial settings.
+
 #### Compressor Inverter V2.4 Profile
 
 This profile is only for the heat-pump compressor inverter bus, not the fan protocol. The hp-52kw firmware uses inverter node IDs 1 and 2 on `RS485_3`/USART2. Use `compressor_inverter_v24` for the inverter-side child and `--slave-respond-1-40` to keep ID 1 and ID 2 state isolated while allowing both nodes:

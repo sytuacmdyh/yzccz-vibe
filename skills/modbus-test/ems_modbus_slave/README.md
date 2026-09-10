@@ -11,6 +11,7 @@ Modbus test 技能仅使用 `app.py --cli --stdio-control`，无需 PySide6 或�
 - Python + Qt（PySide6）桌面应用
 - 从 `profiles/*.json` 加载设备协议配置
 - 当前实机协议：`顿力 EC137-A500-C40`（`profiles/ec137_a500_c40.json`，19200 8N1，FC03/04/06）
+- 压缩机变频器协议：儒竞 V1.3（`profiles/rujing_compressor_inverter_v13.json`，4800 8N1，FC03/06/16）；[点表、原始值与 CSV 示例](docs/rujing_compressor_inverter_v13.md)
 - 压缩机变频器协议：厂家 V2.4（`profiles/compressor_inverter_v24.json`，9600 8N2，FC03/06）
 - 通过 `USB -> RS485` 提供串口 RTU 从站服务
 - 接收按支持的请求长度与CRC提取完整帧，兼容USB拆包、拼包和截断前缀；未完整尾部保留并限制为256字节，不把主机交付间隔视为线缆t3.5。未知功能码的合法CRC帧仍经空闲间隔交给协议异常应答。
@@ -80,7 +81,9 @@ EMS Modbus Slave/
 Profile 可选 `device_model`、`per_slave_addresses` 和寄存器 `register_type` 元数据。`register_type` 为 `hold` 时仅响应 FC03，为 `input` 时仅响应 FC04；访问错误寄存器空间返回非法数据地址。未声明 `per_slave_addresses` 的旧 Profile 继续使用 EMS 兼容的传统按从站隔离地址集合；声明后，集合内地址按 `(slave_id, address)` 独立保存。EC137 Profile 将 D000、D001、D010..D014、D101、D119、D16C 全部隔离，因此 `--respond-1-40` 下的 1#/2# 风机状态互不共享。
 
 EC137 的实际风机配置顺序是 D16C=0、D101=1、D119=925，目标写入 D001，遥测通过 FC04 读取 D010..D014。对 `device_model=ec_fan` 的 Profile，实际 FC06 写入 per-slave D000 且 bit2 置位时，先返回正常 FC06 回显，再清除同一节点 D011 并将 D000 恢复为 0；stdio 的 `set_register`/CSV `slave_write` 使用 `set_direct` 原始注入，不触发该副作用。
-压缩机变频器 Profile 使用 FC03 读取保持寄存器、FC06 写单寄存器，固定采用 9600 8N2。固件状态读取从 `0x6005` 连续读取 18 个寄存器，`0x8001` 为频率设定，`0x8000` 为启动/停机/故障复位控制字；模拟器不自动合成或清除这些值。具体的 V2.4 地址、原始单位和复位顺序见上层 `skills/modbus-test/SKILL.md` 的 Compressor Inverter V2.4 Profile 小节。
+厂家 V2.4 压缩机变频器 Profile 使用 FC03 读取保持寄存器、FC06 写单寄存器，固定采用 9600 8N2。固件状态读取从 `0x6005` 连续读取 18 个寄存器，`0x8001` 为频率设定，`0x8000` 为启动/停机/故障复位控制字；模拟器不自动合成或清除这些值。具体的 V2.4 地址、原始单位和复位顺序见上层 `skills/modbus-test/SKILL.md` 的 Compressor Inverter V2.4 Profile 小节。
+
+Profile 可选 `max_read_registers`（1–125，默认125）限制每帧 FC03 读取数量；儒竞 V1.3 设为50，超限返回非法数据值异常。
 
 **Preset**（`presets/`）定义运行场景：初始寄存器/线圈值、EMS 网页侧联动数据、启用的 Capture 点位、State 面板字段等。
 

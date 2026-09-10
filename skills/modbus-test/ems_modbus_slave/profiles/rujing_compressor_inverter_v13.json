@@ -1,0 +1,762 @@
+{
+  "profile_id": "rujing_compressor_inverter_v13",
+  "name": "儒竞压缩机变频器 V1.3",
+  "device_model": "compressor_inverter",
+  "description": "儒竞驱动板热泵通用驱动协议V1.3（文档标题：爱美泰热泵驱动）；仅压缩机相关点位。4800 8N1，线上地址为文档地址减1，状态与故障手动注入。",
+  "source": {
+    "protocol": "儒竞驱动板-热泵通用驱动协议-V1.3.pdf",
+    "document_title": "爱美泰热泵驱动(MODBUS)协议",
+    "version": "V1.3",
+    "revision_date": "2023-08-22",
+    "pages": "3–14"
+  },
+  "slave_id": 1,
+  "baudrate": 4800,
+  "serial": {
+    "bytesize": 8,
+    "parity": "N",
+    "stopbits": 1
+  },
+  "function_codes": [
+    3,
+    6,
+    16
+  ],
+  "max_read_registers": 50,
+  "per_slave_addresses": [
+    1999,
+    2000,
+    2001,
+    2002,
+    2003,
+    2004,
+    2005,
+    2099,
+    2100,
+    2101,
+    2102,
+    2103,
+    2104,
+    2105,
+    2106,
+    2107,
+    2108,
+    2109,
+    2110,
+    2111,
+    2112,
+    2113,
+    2114,
+    2115,
+    2116,
+    2117,
+    2118,
+    2119,
+    2120,
+    2121,
+    2122,
+    2123,
+    2124,
+    2125,
+    2126,
+    2127,
+    2139
+  ],
+  "status_fields": [
+    {
+      "label": "运行状态",
+      "kind": "register",
+      "address": 2099,
+      "scale": 1,
+      "suffix": ""
+    },
+    {
+      "label": "运行频率",
+      "kind": "register",
+      "address": 2102,
+      "scale": 1,
+      "suffix": ""
+    },
+    {
+      "label": "AC输入电流",
+      "kind": "register",
+      "address": 2106,
+      "scale": 10,
+      "suffix": " A"
+    },
+    {
+      "label": "相电流",
+      "kind": "register",
+      "address": 2107,
+      "scale": 10,
+      "suffix": " A"
+    },
+    {
+      "label": "母线电压",
+      "kind": "register",
+      "address": 2108,
+      "scale": 1,
+      "suffix": ""
+    },
+    {
+      "label": "停机故障",
+      "kind": "register",
+      "address": 2100,
+      "scale": 1,
+      "suffix": ""
+    },
+    {
+      "label": "报警故障",
+      "kind": "register",
+      "address": 2101,
+      "scale": 1,
+      "suffix": ""
+    },
+    {
+      "label": "停机故障2",
+      "kind": "register",
+      "address": 2109,
+      "scale": 1,
+      "suffix": ""
+    },
+    {
+      "label": "散热器温度原始值（℃=raw−55）",
+      "kind": "register",
+      "address": 2110,
+      "scale": 1,
+      "suffix": ""
+    }
+  ],
+  "registers": [
+    {
+      "address": 1999,
+      "address_label": "2000 (wire 1999 / 0x07CF)",
+      "name": "设定输出机械频率",
+      "key": "frequency_setpoint",
+      "access": "rw",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 120,
+      "unit": "Hz",
+      "description": "普通精度 raw=Hz，0..120；高精度暂时无效。",
+      "source": {
+        "document_address": 2000
+      }
+    },
+    {
+      "address": 2000,
+      "address_label": "2001 (wire 2000 / 0x07D0)",
+      "name": "开关机状态/辅助功能",
+      "key": "control_word",
+      "access": "rw",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "bit0 压缩机启动，bit1 PFC开启（单相），bit2 压缩机预热，bit3 高精度控制（暂时无效），bit4..15预留；0=关闭，1=开启。",
+      "source": {
+        "document_address": 2001
+      }
+    },
+    {
+      "address": 2001,
+      "address_label": "2002 (wire 2001 / 0x07D1)",
+      "name": "室外环境温度",
+      "key": "outdoor_temperature",
+      "access": "rw",
+      "register_type": "hold",
+      "data_type": "i16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "raw",
+      "description": "预留未使用；int16(raw)/10 ℃，-990为开路、1990为短路；以16位补码注入和传输。",
+      "source": {
+        "document_address": 2002
+      }
+    },
+    {
+      "address": 2002,
+      "address_label": "2003 (wire 2002 / 0x07D2)",
+      "name": "输入电流限制",
+      "key": "input_current_limit",
+      "access": "rw",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "0.1 A",
+      "description": "预留未使用，参数在驱动EEPROM；单相3~4HP范围140..220，5~6HP范围140..400，默认分别20A/30A，主控值不能超过驱动设定值。模拟器不模拟机型相关限值或掉电保持。",
+      "source": {
+        "document_address": 2003
+      }
+    },
+    {
+      "address": 2003,
+      "address_label": "2004 (wire 2003 / 0x07D3)",
+      "name": "压缩机机型码选择",
+      "key": "compressor_model_selection",
+      "access": "rw",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "0x0000..0xFFFF；具体编码另见厂家《变频压缩机机型规划》。",
+      "source": {
+        "document_address": 2004
+      }
+    },
+    {
+      "address": 2004,
+      "address_label": "2005 (wire 2004 / 0x07D4)",
+      "name": "压缩机升频速率",
+      "key": "frequency_ramp_up",
+      "access": "rw",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "0.01 Hz/s",
+      "description": "预留未使用；文档50..500=0.5..5Hz/s，同时记载默认1Hz/s和越界默认200=2Hz/s；模拟器按原始字保存，不执行默认回退。",
+      "source": {
+        "document_address": 2005
+      }
+    },
+    {
+      "address": 2005,
+      "address_label": "2006 (wire 2005 / 0x07D5)",
+      "name": "压缩机降频速率",
+      "key": "frequency_ramp_down",
+      "access": "rw",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "0.01 Hz/s",
+      "description": "预留未使用；文档50..500=0.5..5Hz/s，同时记载默认1Hz/s和越界默认200=2Hz/s；模拟器按原始字保存，不执行默认回退。",
+      "source": {
+        "document_address": 2006
+      }
+    },
+    {
+      "address": 2099,
+      "address_label": "2100 (wire 2099 / 0x0833)",
+      "name": "压缩机驱动器工作状态",
+      "key": "working_status",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "bit0 运转；bit1 PFC开启（单相）；bit2 芯片复位；bit3 频率稳定（±2Hz）；bit4 升频；bit5 降频；bit6 停机保护；bit7 报警保护；bit8 节能；bit9 预充电完成；bit10..15预留。",
+      "source": {
+        "document_address": 2100
+      }
+    },
+    {
+      "address": 2100,
+      "address_label": "2101 (wire 2100 / 0x0834)",
+      "name": "压缩机驱动器停机故障代码",
+      "key": "shutdown_fault",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "bit0 IPM/PIM过流；bit1 驱动失败；bit2 相电流过流；bit3 三相缺相；bit4 IPM/PIM电流采样故障；bit5 功率部件过热；bit6 预充电失败；bit7 母线过压；bit8 母线欠压；bit9 AC欠压；bit10 AC过流；bit11 输入电压采样故障；bit12 DSP/PFC通讯故障；bit13 温度传感器故障；bit14 DSP/通讯板通讯故障；bit15 与主控通讯异常。",
+      "source": {
+        "document_address": 2101
+      }
+    },
+    {
+      "address": 2101,
+      "address_label": "2102 (wire 2101 / 0x0835)",
+      "name": "压缩机驱动器报警故障代码",
+      "key": "alarm_fault",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "bit0 压缩机过电流限/降频；bit1 弱磁保护；bit2 PIM过热；bit3 PFC过热；bit4 AC过电流；bit5 EEPROM故障；bit6 NA；bit7 EEPROM刷新完成（重启后消除）；bit8 温度传感器故障限频；bit9 AC欠压限频；bit10..15 NA。模拟器不会自动消除任何位。",
+      "source": {
+        "document_address": 2102
+      }
+    },
+    {
+      "address": 2102,
+      "address_label": "2103 (wire 2102 / 0x0836)",
+      "name": "压缩机运行机械频率",
+      "key": "output_frequency",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "Hz",
+      "description": "普通精度0..120=0..120Hz；儒竞高精度状态无定义。",
+      "source": {
+        "document_address": 2103
+      }
+    },
+    {
+      "address": 2103,
+      "address_label": "2104 (wire 2103 / 0x0837)",
+      "name": "压缩机允许最大频率",
+      "key": "maximum_frequency",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 120,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "Hz",
+      "description": "普通精度0..120Hz，待机120Hz；高精度状态无定义。",
+      "source": {
+        "document_address": 2104
+      }
+    },
+    {
+      "address": 2104,
+      "address_label": "2105 (wire 2104 / 0x0838)",
+      "name": "散热器降频值",
+      "key": "heatsink_derating_temperature",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "raw",
+      "description": "预留；raw=0..255，温度=raw-55 ℃，实际驱动板控制。",
+      "source": {
+        "document_address": 2105
+      }
+    },
+    {
+      "address": 2105,
+      "address_label": "2106 (wire 2105 / 0x0839)",
+      "name": "AC输入电压值",
+      "key": "input_voltage",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "V",
+      "description": "raw=0..500 Vrms；三相为线电压均值。",
+      "source": {
+        "document_address": 2106
+      }
+    },
+    {
+      "address": 2106,
+      "address_label": "2107 (wire 2106 / 0x083A)",
+      "name": "AC输入电流值",
+      "key": "input_current",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "0.1 A",
+      "description": "raw/10 A，文档范围0..500；三相为三路电流均值。",
+      "source": {
+        "document_address": 2107
+      }
+    },
+    {
+      "address": 2107,
+      "address_label": "2108 (wire 2107 / 0x083B)",
+      "name": "压缩机相电流值",
+      "key": "phase_current",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "0.1 A",
+      "description": "raw/10 A RMS，文档范围0..500。",
+      "source": {
+        "document_address": 2108
+      }
+    },
+    {
+      "address": 2108,
+      "address_label": "2109 (wire 2108 / 0x083C)",
+      "name": "母线电压值",
+      "key": "bus_voltage",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "V",
+      "description": "raw=0..800 Vdc。",
+      "source": {
+        "document_address": 2109
+      }
+    },
+    {
+      "address": 2109,
+      "address_label": "2110 (wire 2109 / 0x083D)",
+      "name": "压缩机驱动器停机故障代码2",
+      "key": "shutdown_fault_2",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "bit0 IPM过热；bit1 压缩机缺相；bit2 压缩机过载；bit3 输入电流采样故障；bit4 PIM供电电压故障；bit5 预充电路电压故障；bit6 EEPROM故障；bit7 AC过压；bit8 微电子故障（输出电流采样AD异常）；bit9 压缩机机型码故障；bit10 电流采样信号过流；bit11..15 NA。",
+      "source": {
+        "document_address": 2110
+      }
+    },
+    {
+      "address": 2110,
+      "address_label": "2111 (wire 2110 / 0x083E)",
+      "name": "散热器温度值",
+      "key": "heatsink_temperature",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "raw",
+      "description": "raw=0..255，温度=raw-55 ℃。",
+      "source": {
+        "document_address": 2111
+      }
+    },
+    {
+      "address": 2111,
+      "address_label": "2112 (wire 2111 / 0x083F)",
+      "name": "驱动器累计运行时间",
+      "key": "running_hours",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "h",
+      "description": "0..65000小时；实机掉电保持且饱和于65000，模拟器仅保存注入值。",
+      "source": {
+        "document_address": 2112
+      }
+    },
+    {
+      "address": 2112,
+      "address_label": "2113 (wire 2112 / 0x0840)",
+      "name": "驱动器输出电压",
+      "key": "output_voltage",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "V",
+      "description": "raw=0..280 Vrms，输出相电压。",
+      "source": {
+        "document_address": 2113
+      }
+    },
+    {
+      "address": 2113,
+      "address_label": "2114 (wire 2113 / 0x0841)",
+      "name": "DSP及PFC软件版本",
+      "key": "dsp_pfc_version",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "高字节DSP版本，低字节PFC版本；字节值1表示V001。",
+      "source": {
+        "document_address": 2114
+      }
+    },
+    {
+      "address": 2114,
+      "address_label": "2115 (wire 2114 / 0x0842)",
+      "name": "通信软件版本及机组机型",
+      "key": "communication_version",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "预留；高字节保留，低字节通信软件版本/机组机型，厂家内部控制。",
+      "source": {
+        "document_address": 2115
+      }
+    },
+    {
+      "address": 2115,
+      "address_label": "2116 (wire 2115 / 0x0843)",
+      "name": "DSP软件项目编号",
+      "key": "dsp_project",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "16位项目编号，例如0x5801表示AC58I01。",
+      "source": {
+        "document_address": 2116
+      }
+    },
+    {
+      "address": 2116,
+      "address_label": "2117 (wire 2116 / 0x0844)",
+      "name": "PFC软件项目编号",
+      "key": "pfc_project",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "仅适用于单相系列；16位项目编号，例如0x5801表示AC58I01。",
+      "source": {
+        "document_address": 2117
+      }
+    },
+    {
+      "address": 2117,
+      "address_label": "2118 (wire 2117 / 0x0845)",
+      "name": "通信软件项目编号",
+      "key": "communication_project",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "预留，单独通讯芯片时使用；例如0x5801表示AC58I01。",
+      "source": {
+        "document_address": 2118
+      }
+    },
+    {
+      "address": 2118,
+      "address_label": "2119 (wire 2118 / 0x0846)",
+      "name": "EEPROM版本号",
+      "key": "eeprom_version",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "16位EEPROM版本，主控需读取。",
+      "source": {
+        "document_address": 2119
+      }
+    },
+    {
+      "address": 2119,
+      "address_label": "2120 (wire 2119 / 0x0847)",
+      "name": "产品名称第1、2个字符",
+      "key": "product_name_1",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "产品命名规则的ASCII码；保留原始16位字。",
+      "source": {
+        "document_address": 2120
+      }
+    },
+    {
+      "address": 2120,
+      "address_label": "2121 (wire 2120 / 0x0848)",
+      "name": "产品名称第3、4个字符",
+      "key": "product_name_2",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "产品命名规则的ASCII码；保留原始16位字。",
+      "source": {
+        "document_address": 2121
+      }
+    },
+    {
+      "address": 2121,
+      "address_label": "2122 (wire 2121 / 0x0849)",
+      "name": "产品名称第5、6个字符",
+      "key": "product_name_3",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "产品命名规则的ASCII码；保留原始16位字。",
+      "source": {
+        "document_address": 2122
+      }
+    },
+    {
+      "address": 2122,
+      "address_label": "2123 (wire 2122 / 0x084A)",
+      "name": "产品名称第7、8个字符",
+      "key": "product_name_4",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "产品命名规则的ASCII码；保留原始16位字。",
+      "source": {
+        "document_address": 2123
+      }
+    },
+    {
+      "address": 2123,
+      "address_label": "2124 (wire 2123 / 0x084B)",
+      "name": "产品名称第9、10个字符",
+      "key": "product_name_5",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "产品命名规则的ASCII码；保留原始16位字。",
+      "source": {
+        "document_address": 2124
+      }
+    },
+    {
+      "address": 2124,
+      "address_label": "2125 (wire 2124 / 0x084C)",
+      "name": "产品名称第11、12个字符",
+      "key": "product_name_6",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "产品命名规则的ASCII码；保留原始16位字。",
+      "source": {
+        "document_address": 2125
+      }
+    },
+    {
+      "address": 2125,
+      "address_label": "2126 (wire 2125 / 0x084D)",
+      "name": "EEPROM项目编号",
+      "key": "eeprom_project",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "16位EEPROM数据项目编号，例如0x5821表示AC58I21。",
+      "source": {
+        "document_address": 2126
+      }
+    },
+    {
+      "address": 2126,
+      "address_label": "2127 (wire 2126 / 0x084E)",
+      "name": "PIM/IPM温度",
+      "key": "power_module_temperature",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "raw",
+      "description": "实际温度=raw-55 ℃。",
+      "source": {
+        "document_address": 2127
+      }
+    },
+    {
+      "address": 2127,
+      "address_label": "2128 (wire 2127 / 0x084F)",
+      "name": "压缩机机型码",
+      "key": "compressor_model",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "",
+      "description": "驱动反馈的压缩机机型码。",
+      "source": {
+        "document_address": 2128
+      }
+    },
+    {
+      "address": 2139,
+      "address_label": "2140 (wire 2139 / 0x085B)",
+      "name": "PFC温度",
+      "key": "pfc_temperature",
+      "access": "r",
+      "register_type": "hold",
+      "data_type": "u16",
+      "default_raw": 0,
+      "min_raw": 0,
+      "max_raw": 65535,
+      "unit": "raw",
+      "description": "实际温度=raw-55 ℃。",
+      "source": {
+        "document_address": 2140
+      }
+    }
+  ],
+  "coils": []
+}

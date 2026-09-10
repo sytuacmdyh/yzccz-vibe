@@ -134,7 +134,11 @@ class DeviceProfile:
         serial_bytesize: int = 8,
         serial_parity: str = "N",
         serial_stopbits: float = 1,
+        max_read_registers: int = 125,
     ) -> None:
+        if type(max_read_registers) is not int or not 1 <= max_read_registers <= 125:
+            raise ValueError("max_read_registers must be an integer between 1 and 125")
+        self.max_read_registers = max_read_registers
         self.profile_id = profile_id
         self.name = name
         self.description = description
@@ -183,6 +187,7 @@ class DeviceProfile:
             raw_data=data,
             device_model=str(data.get("device_model", "")),
             per_slave_addresses=data.get("per_slave_addresses"),
+            max_read_registers=data.get("max_read_registers", 125),
         )
 
 
@@ -202,6 +207,7 @@ class DeviceProfile:
                 "stopbits": self.serial_stopbits,
             },
             "function_codes": list(self.function_codes),
+            "max_read_registers": self.max_read_registers,
             "startup_preset": self.startup_preset,
             "status_fields": deepcopy(self.status_fields),
             "bindings": deepcopy(self.bindings),

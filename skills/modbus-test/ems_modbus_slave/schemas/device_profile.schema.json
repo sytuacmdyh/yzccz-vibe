@@ -21,6 +21,7 @@
       "additionalProperties": false
     },
     "function_codes": { "type": "array", "items": { "type": "integer" } },
+    "max_read_registers": { "type": "integer", "minimum": 1, "maximum": 125, "default": 125 },
     "per_slave_addresses": {
       "type": "array",
       "items": { "type": "integer", "minimum": 0, "maximum": 65535 },

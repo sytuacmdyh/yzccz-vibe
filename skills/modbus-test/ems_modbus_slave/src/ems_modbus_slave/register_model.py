@@ -361,7 +361,7 @@ class RegisterBank:
     def _handle_fc03(self, frame: bytes, slave_id: int) -> bytes:
         start_addr = (frame[2] << 8) | frame[3]
         count = (frame[4] << 8) | frame[5]
-        if count <= 0 or count > 125:
+        if count <= 0 or count > self.profile.max_read_registers:
             return build_exception(slave_id, FC_READ_HOLDING, EX_ILLEGAL_DATA_VALUE)
 
         values: List[int] = []
