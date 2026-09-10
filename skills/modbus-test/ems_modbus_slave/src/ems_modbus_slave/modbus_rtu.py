@@ -12,6 +12,11 @@ FC_WRITE_SINGLE = 0x06
 FC_WRITE_MULTIPLE_COILS = 0x0F
 FC_WRITE_MULTIPLE = 0x10
 
+FIXED_REQUEST_FUNCTIONS = frozenset((FC_READ_COILS, FC_READ_HOLDING, FC_READ_INPUT,
+                                     FC_WRITE_SINGLE_COIL, FC_WRITE_SINGLE))
+VARIABLE_REQUEST_FUNCTIONS = frozenset((FC_WRITE_MULTIPLE_COILS, FC_WRITE_MULTIPLE))
+SUPPORTED_REQUEST_FUNCTIONS = FIXED_REQUEST_FUNCTIONS | VARIABLE_REQUEST_FUNCTIONS
+
 EX_ILLEGAL_FUNCTION = 0x01
 EX_ILLEGAL_DATA_ADDRESS = 0x02
 EX_ILLEGAL_DATA_VALUE = 0x03
@@ -39,6 +44,43 @@ def validate_crc(frame: bytes) -> bool:
         return False
     received = frame[-2] | (frame[-1] << 8)
     return crc16_modbus(frame[:-2]) == received
+
+
+def extract_requests(buffer: bytearray) -> list[bytes]:
+    """Recover complete supported requests without relying on USB read boundaries.
+
+    Serial/USB delivery can coalesce frames or begin midway through one. Scan
+    for a plausible length and valid CRC, retaining incomplete tails. Unknown
+    functions remain available to the receiver's idle-gap fallback.
+    """
+    frames = []
+    offset = 0
+    while len(buffer) - offset >= 8:
+        if not 0 <= buffer[offset] <= 247:
+            offset += 1
+            continue
+        function = buffer[offset + 1]
+        if function in FIXED_REQUEST_FUNCTIONS:
+            size = 8
+        elif function in VARIABLE_REQUEST_FUNCTIONS:
+            size = 9 + buffer[offset + 6]
+            if size > 256:
+                offset += 1
+                continue
+        else:
+            offset += 1
+            continue
+        frame = bytes(buffer[offset:offset + size])
+        if len(frame) == size and validate_crc(frame):
+            frames.append(frame)
+            del buffer[:offset + size]
+            offset = 0
+        else:
+            offset += 1
+    # An RTU ADU cannot exceed 256 bytes; bound noise retained between reads.
+    if len(buffer) > 256:
+        del buffer[:-256]
+    return frames
 
 
 @dataclass

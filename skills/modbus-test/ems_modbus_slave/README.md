@@ -13,6 +13,7 @@ Modbus test 技能仅使用 `app.py --cli --stdio-control`，无需 PySide6 或�
 - 当前实机协议：`顿力 EC137-A500-C40`（`profiles/ec137_a500_c40.json`，19200 8N1，FC03/04/06）
 - 压缩机变频器协议：厂家 V2.4（`profiles/compressor_inverter_v24.json`，9600 8N2，FC03/06）
 - 通过 `USB -> RS485` 提供串口 RTU 从站服务
+- 接收按支持的请求长度与CRC提取完整帧，兼容USB拆包、拼包和截断前缀；未完整尾部保留并限制为256字节，不把主机交付间隔视为线缆t3.5。未知功能码的合法CRC帧仍经空闲间隔交给协议异常应答。
 
 - 寄存器/线圈点表在线编辑
 - State 状态面板，支持右键添加/移除监控点

@@ -15,6 +15,8 @@ from .modbus_rtu import (
     FC_WRITE_MULTIPLE_COILS,
     FC_WRITE_SINGLE,
     FC_WRITE_SINGLE_COIL,
+    SUPPORTED_REQUEST_FUNCTIONS,
+    extract_requests,
     parse_request,
 )
 from .protocol_messages import describe_request, describe_response
@@ -141,8 +143,15 @@ class SerialSlaveServer:
             if incoming:
                 rx.extend(incoming)
                 last_byte_ts = time.monotonic()
+                for frame in extract_requests(rx):
+                    self._handle_frame(frame)
 
-            if rx and (time.monotonic() - last_byte_ts) >= frame_gap:
+            # USB delivery gaps are not wire t3.5 gaps. Keep incomplete/invalid
+            # tails for bounded resynchronization by extract_requests(). Only
+            # CRC-valid unknown requests use the idle fallback (for exceptions).
+            if (len(rx) >= 4 and rx[1] not in SUPPORTED_REQUEST_FUNCTIONS
+                    and (time.monotonic() - last_byte_ts) >= frame_gap
+                    and parse_request(bytes(rx)) is not None):
                 frame = bytes(rx)
                 rx.clear()
                 self._handle_frame(frame)
