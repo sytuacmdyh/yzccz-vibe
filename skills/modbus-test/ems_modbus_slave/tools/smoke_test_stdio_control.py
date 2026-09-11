@@ -4,7 +4,7 @@
   python tools\\smoke_test_stdio_control.py            # 仅单元式（分发器直驱，无串口依赖）
   python tools\\smoke_test_stdio_control.py --port COM5  # 追加端到端（拉起 --cli --stdio-control 子进程）
 
-单元式覆盖：set/get_register、get_registers、slave_id 分槽、set/get_coil、snapshot、
+单元式覆盖：set/get_register、get_registers、slave_id 分槽、reset_defaults、set/get_coil、snapshot、
 get_profile、未知 op、字段缺失/类型错误。
 端到端覆盖：ready 事件、请求/响应往返、shutdown 优雅退出（退出码 0）。
 """
@@ -54,6 +54,13 @@ def unit_tests() -> None:
     slotted = call("set_register", address=11, value=450, slave_id=2)
     check("set_register slave_id ok", slotted.get("ok") is True, str(slotted))
     check("per-slave slot isolated", bank.get(11, 2) == 450 and bank.get(11) != 450)
+
+    default_604 = bank.profile.by_address[604].default
+    call("set_enabled", slave_id=2, enabled=False)
+    reset = call("reset_defaults")
+    check("reset_defaults ok", reset.get("ok") is True, str(reset))
+    check("reset_defaults restores register", bank.get(604) == default_604)
+    check("reset_defaults restores nodes", 2 not in bank._silent_nodes)
 
     rng = call("get_registers", address=600, count=3)
     check("get_registers count", isinstance(rng.get("values"), list) and len(rng["values"]) == 3, str(rng))

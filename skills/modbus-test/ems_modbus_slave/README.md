@@ -198,6 +198,7 @@ python app.py --cli --stdio-control --port COM5 --profile dm_hp3_rs48_v2 `
 | `get_register` | `address`, `slave_id?` | 读单个寄存器 |
 | `get_registers` | `address`, `count`, `slave_id?` | 读连续寄存器 |
 | `set_register` | `address`, `value`, `slave_id?` | 注入写入（经 `set_direct`，绕过 writable 限制） |
+| `reset_defaults` | 无 | 恢复 Profile/Preset 默认值并重新启用所有节点，串口保持打开 |
 | `get_coil` / `set_coil` | `address`, `value`(true/false/1/0) | 线圈读写 |
 | `snapshot` | `slave_id?` | 全量寄存器/线圈快照 |
 | `get_profile` | — | 当前 profile 信息 |

@@ -397,6 +397,7 @@ When inline wait options are used:
 - Exactly one of `timeout` or `logic_timeout` is required (mutually exclusive)
 - `timeout` uses host wall-clock time; `logic_timeout` uses device logic time from `--time-addr`
 - `interval` is optional, must be > 0, uses host wall-clock time
+- `logic_timeout` performs one final target read when the deadline is observed; a matching final sample passes. This is a polling timeout, not proof that the target changed before an exact deadline.
 - Inline wait settings override the global wait loop for that CSV row only
 
 ### Device Logic Time Contract

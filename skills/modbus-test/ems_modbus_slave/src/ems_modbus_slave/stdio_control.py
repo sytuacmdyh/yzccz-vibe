@@ -13,6 +13,7 @@
 - get_registers  {address, count, slave_id?}  -> {"values": [int, ...]}
 - set_register   {address, value, slave_id?}  -> {"ok": true, "value": int}（经 set_direct 注入，不受 writable 限制）
 - set_enabled    {slave_id, enabled}          -> {"ok": true, "slave_id": int, "enabled": bool}（节点1..247；仅控制RTU响应）
+- reset_defaults {}                           -> {"ok": true}
 - get_coil       {address}                    -> {"value": 0|1}
 - set_coil       {address, value}             -> {"ok": true}（value 接受 true/false/1/0）
 - snapshot       {slave_id?}                  -> {"rows": [...]}（复用 RegisterBank.snapshot）
@@ -85,6 +86,9 @@ def handle_command(bank: RegisterBank, command: dict[str, Any]) -> dict[str, Any
             enabled = _bool(command, "enabled", required=True)
             bank.set_enabled(slave_id, enabled)
             return {"ok": True, "slave_id": slave_id, "enabled": enabled}
+        if op == "reset_defaults":
+            bank.reset_defaults()
+            return {"ok": True}
         if op == "get_register":
             address = _int(command, "address", required=True)
             return {"ok": True, "address": address, "value": bank.get(address, _int(command, "slave_id"))}

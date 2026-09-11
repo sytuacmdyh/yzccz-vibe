@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import csv
 import datetime
 import glob
@@ -249,7 +250,7 @@ class SlaveContext:
     stop_timeout: float = 5.0
     proc: subprocess.Popen | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
-    lines: list[str] = field(default_factory=list)
+    lines: deque[str] = field(default_factory=lambda: deque(maxlen=2000))
     next_id: int = 1
     started: bool = False
 
@@ -886,6 +887,25 @@ def read_register(client: Any, slave_id: int, addr: int) -> tuple[bool, int | No
     if not registers:
         return False, None, "response has no registers"
     return True, int(registers[0]), ""
+
+
+def read_registers(client: Any, slave_id: int, addr: int, count: int) -> tuple[bool, list[int] | None, str]:
+    if not 1 <= count <= 125 or not 0 <= addr <= 65536 - count:
+        return False, None, "invalid FC03 address range or count (1-125 required)"
+    try:
+        result = client.read_holding_registers(address=addr, count=count, device_id=slave_id)
+    except Exception as exc:  # pragma: no cover - hardware dependent
+        return False, None, str(exc)
+
+    if result is None:
+        return False, None, "empty Modbus response"
+    if result.isError():
+        return False, None, str(result)
+    registers = getattr(result, "registers", None)
+    if registers is None or len(registers) != count:
+        actual_count = 0 if registers is None else len(registers)
+        return False, None, f"expected {count} registers, got {actual_count}"
+    return True, [int(value) for value in registers], ""
 
 
 def write_register(client: Any, slave_id: int, addr: int, value: int) -> tuple[bool, str]:
@@ -1570,6 +1590,36 @@ def slave_wait_ready(slave: SlaveContext) -> dict[str, Any]:
     )
 
 
+def slave_wait_rtu_ready(slave: SlaveContext, timeout_s: float = 20.0) -> None:
+    """Wait until the serial slave has returned at least one RTU response."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        proc = slave.proc
+        if proc is None or proc.poll() is not None:
+            exit_code = proc.poll() if proc is not None else None
+            raise SlaveControlError(
+                f"slave process exited before RTU activity (code={exit_code}): "
+                f"{slave_collect_logs(slave)}"
+            )
+        with slave.lock:
+            for line in slave.lines:
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(message, dict)
+                    and message.get("type") == "log"
+                    and str(message.get("message", "")).startswith("TX: ")
+                ):
+                    return
+        time.sleep(0.05)
+    raise SlaveControlError(
+        f"slave saw no RTU response within {format_seconds(timeout_s)}s: "
+        f"{slave_collect_logs(slave)}"
+    )
+
+
 def slave_command(slave: SlaveContext, op: str, timeout_s: float = 10.0, **params: Any) -> dict[str, Any]:
     """Send one JSON-RPC request and wait for the matching response."""
     proc = slave.proc
@@ -1634,6 +1684,11 @@ def slave_write_register(slave: SlaveContext, addr: int, value: int, slave_id: i
     if slave_id is not None:
         params["slave_id"] = slave_id
     slave_command(slave, "set_register", **params)
+
+
+def slave_reset_defaults(slave: SlaveContext) -> None:
+    """Restore profile defaults without closing the serial port."""
+    slave_command(slave, "reset_defaults")
 
 
 def slave_shutdown(slave: SlaveContext) -> None:
@@ -2341,6 +2396,11 @@ def execute_step(step: Step, ctx: ExecutionContext) -> StepResult:
                     )
                     if ok and actual is not None:
                         last_actual = actual
+                        if matches_expected(actual, wait_spec.kind, wait_spec.expected):
+                            return StepResult(
+                                index, step.func, "PASS", summary,
+                                f"expected={label} actual={actual} logic_elapsed={le}s",
+                            )
                     return StepResult(
                         index, step.func, "FAIL", summary,
                         f"expected={label} actual={last_actual} "
