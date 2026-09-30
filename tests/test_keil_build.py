@@ -106,16 +106,139 @@ def test_configuration_status_reports_missing_fields(
         lambda repo: ("git@example.com:group/project.git", "example.com/group/project"),
     )
     monkeypatch.setattr(keil_build, "suggested_uv4", lambda: None)
+    monkeypatch.setattr(keil_build, "wsl_to_windows", lambda repo: r"\\wsl.localhost\Ubuntu\repo")
+    monkeypatch.setattr(keil_build, "validate_windows_repo", lambda *args: None)
 
     status = keil_build.configuration_status(tmp_path, tmp_path / "missing.json")
 
     assert status["ok"] is False
     assert status["remote_id"] == "example.com/group/project"
-    assert status["missing"] == [
-        "keil.uv4",
-        "projects.example.com/group/project.windows_repo",
-    ]
+    assert status["missing"] == ["keil.uv4"]
     assert status["invalid"] == []
+    assert status["source"]["mode"] == "wsl"
+
+
+@pytest.mark.parametrize("project", [{}, {"mode": "wsl"}])
+def test_wsl_source_uses_current_checkout_without_storing_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project: dict
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = keil_build.empty_config()
+    config["keil"]["uv4"] = r"C:\Keil\UV4.exe"
+    config["projects"]["example.com/repo"] = project
+    keil_build.save_config(config_path, config)
+    config_before = config_path.read_bytes()
+    monkeypatch.setattr(keil_build, "require_tools", lambda *args: None)
+    monkeypatch.setattr(keil_build, "repo_remote", lambda repo: ("", "example.com/repo"))
+    monkeypatch.setattr(keil_build, "validate_uv4", lambda path: None)
+    monkeypatch.setattr(
+        keil_build, "wsl_to_windows", lambda repo: rf"\\wsl.localhost\Ubuntu\{repo.name}"
+    )
+    checked_paths = []
+
+    def validate_source(path: str, remote: str) -> None:
+        checked_paths.append((path, remote))
+
+    monkeypatch.setattr(keil_build, "validate_windows_repo", validate_source)
+    for checkout in ("main", "feature"):
+        uv4, source, remote = keil_build.configured_values(tmp_path / checkout, config_path)
+        assert uv4 == r"C:\Keil\UV4.exe"
+        assert source == {
+            "mode": "wsl",
+            "windows_repo": rf"\\wsl.localhost\Ubuntu\{checkout}",
+        }
+        assert checked_paths[-1] == (source["windows_repo"], remote)
+    assert config_path.read_bytes() == config_before
+
+
+@pytest.mark.parametrize("error", [None, "origin identifies another repository"])
+def test_existing_windows_clone_is_preserved_even_when_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: str | None
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = keil_build.empty_config()
+    config["keil"]["uv4"] = r"C:\Keil\UV4.exe"
+    config["projects"]["example.com/repo"] = {"windows_repo": r"D:\checkout"}
+    keil_build.save_config(config_path, config)
+    monkeypatch.setattr(keil_build, "require_tools", lambda *args: None)
+    monkeypatch.setattr(keil_build, "repo_remote", lambda repo: ("", "example.com/repo"))
+    monkeypatch.setattr(keil_build, "validate_uv4", lambda path: None)
+
+    def unexpected_conversion(repo: Path) -> str:
+        pytest.fail("an explicit Windows clone must not fall back to WSL")
+
+    monkeypatch.setattr(keil_build, "wsl_to_windows", unexpected_conversion)
+    monkeypatch.setattr(keil_build, "validate_windows_repo", lambda *args: error)
+    status = keil_build.configuration_status(tmp_path, config_path)
+    assert status["ok"] is (error is None)
+    assert status["source"] == {"mode": "windows-clone", "windows_repo": r"D:\checkout"}
+    if error:
+        assert status["invalid"][0]["message"] == error
+
+
+def test_wsl_path_failure_is_reported_in_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(keil_build, "require_tools", lambda *args: None)
+    monkeypatch.setattr(keil_build, "repo_remote", lambda repo: ("", "example.com/repo"))
+    monkeypatch.setattr(keil_build, "suggested_uv4", lambda: None)
+
+    def unavailable(repo: Path) -> str:
+        raise keil_build.SetupError("WSL path unavailable")
+
+    monkeypatch.setattr(keil_build, "wsl_to_windows", unavailable)
+    status = keil_build.configuration_status(tmp_path, tmp_path / "config.json")
+    assert status["ok"] is False
+    assert status["source"] is None
+    assert status["invalid"] == [
+        {"field": "projects.example.com/repo", "message": "WSL path unavailable"}
+    ]
+
+
+def test_config_set_wsl_replaces_clone_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = keil_build.empty_config()
+    config["projects"]["example.com/repo"] = {"windows_repo": r"D:\old"}
+    config["projects"]["example.com/other"] = {"windows_repo": r"D:\other"}
+    keil_build.save_config(config_path, config)
+    monkeypatch.setattr(keil_build, "require_tools", lambda *args: None)
+    monkeypatch.setattr(keil_build, "resolve_repo", lambda value: tmp_path)
+    monkeypatch.setattr(keil_build, "repo_remote", lambda repo: ("", "example.com/repo"))
+    monkeypatch.setattr(keil_build, "wsl_to_windows", lambda repo: r"\\wsl$\Ubuntu\repo")
+    monkeypatch.setattr(keil_build, "validate_windows_repo", lambda *args: None)
+    assert keil_build.main([
+        "config", "set-project", "--wsl", "--config", str(config_path)
+    ]) == 0
+    stored = keil_build.load_config(config_path)
+    assert stored["projects"]["example.com/repo"] == {"mode": "wsl"}
+    assert stored["projects"]["example.com/other"] == {"windows_repo": r"D:\other"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [r"\\wsl.localhost\Ubuntu\home\user\my repo", r"\\wsl$\Ubuntu\home\user\repo",
+     "//wsl.localhost/Ubuntu/home/user/repo", r"C:\repo", r"\\server\share\repo"],
+)
+def test_windows_git_scopes_wsl_trust_to_each_command(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    calls = []
+
+    def capture(args: list[str], *, check: bool) -> subprocess.CompletedProcess:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(keil_build, "run", capture)
+    keil_build.windows_git(path, "rev-parse", "HEAD")
+    assert len(calls) == 1
+    command = calls[0]
+    assert command[-4:] == ["-C", path, "rev-parse", "HEAD"]
+    if "wsl" in path:
+        assert command[:3] == ["git.exe", "-c", "safe.directory=" + path.replace("\\", "/")]
+    else:
+        assert command == ["git.exe", "-C", path, "rev-parse", "HEAD"]
 
 
 def test_prepare_source_snapshot_reuses_clean_head(tmp_path: Path) -> None:

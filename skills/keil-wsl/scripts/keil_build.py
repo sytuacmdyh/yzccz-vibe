@@ -172,7 +172,13 @@ def git_text(repo: Path, *args: str) -> str:
 def windows_git(
     windows_repo: str, *args: str, check: bool = True
 ) -> subprocess.CompletedProcess[bytes]:
-    return run(["git.exe", "-C", windows_repo, *args], check=check)
+    command = ["git.exe"]
+    normalized = windows_repo.replace("\\", "/").rstrip("/")
+    if re.match(r"^//(?:wsl\.localhost|wsl\$)/[^/]+/", normalized, re.IGNORECASE):
+        # Windows sees the WSL owner's SID differently. Trust only this repository,
+        # for this command; never change global safe.directory or trust all paths.
+        command.extend(["-c", f"safe.directory={normalized}"])
+    return run([*command, "-C", windows_repo, *args], check=check)
 
 
 def windows_git_text(windows_repo: str, *args: str) -> str:
@@ -355,13 +361,22 @@ def validate_windows_repo(path: str, expected_remote: str) -> str | None:
     return None
 
 
+def resolve_windows_source(repo: Path, project: dict[str, Any]) -> dict[str, str]:
+    """Keep configured clones; otherwise derive the current checkout's Windows path."""
+    mode = project.get("mode")
+    if mode not in (None, "wsl"):
+        raise SetupError(f"unsupported project mode: {mode!r}")
+    if mode == "wsl" or not project.get("windows_repo"):
+        return {"mode": "wsl", "windows_repo": wsl_to_windows(repo)}
+    return {"mode": "windows-clone", "windows_repo": str(project["windows_repo"])}
+
+
 def configuration_status(repo: Path, path: Path) -> dict[str, Any]:
     require_tools("git", "git.exe", "cmd.exe", "wslpath")
     _, remote_id = repo_remote(repo)
     config = load_config(path)
     uv4 = config.get("keil", {}).get("uv4")
     project = config.get("projects", {}).get(remote_id, {})
-    windows_repo = project.get("windows_repo") if isinstance(project, dict) else None
     missing: list[str] = []
     invalid: list[dict[str, str]] = []
 
@@ -372,24 +387,30 @@ def configuration_status(repo: Path, path: Path) -> dict[str, Any]:
         if error:
             invalid.append({"field": "keil.uv4", "message": error})
 
-    project_field = f"projects.{remote_id}.windows_repo"
-    if not windows_repo:
-        missing.append(project_field)
-    else:
-        error = validate_windows_repo(str(windows_repo), remote_id)
+    project_field = f"projects.{remote_id}"
+    source = None
+    try:
+        if not isinstance(project, dict):
+            raise SetupError("project configuration must be an object")
+        source = resolve_windows_source(repo, project)
+        error = validate_windows_repo(source["windows_repo"], remote_id)
         if error:
-            invalid.append({"field": project_field, "message": error})
+            invalid.append({"field": f"{project_field}.windows_repo", "message": error})
+    except SetupError as exc:
+        invalid.append({"field": project_field, "message": str(exc)})
 
     candidate = suggested_uv4() if not uv4 else None
     return {
         "ok": not missing and not invalid,
         "config_path": str(path),
         "remote_id": remote_id,
+        "source": source,
         "missing": missing,
         "invalid": invalid,
         "candidates": {"keil.uv4": candidate} if candidate else {},
         "hints": {
             "set_keil": "config set-keil --uv4 <WINDOWS_PATH_TO_UV4_EXE>",
+            "use_wsl": "config set-project --repo <WSL_REPOSITORY> --wsl",
             "set_project": (
                 "config set-project --repo <WSL_REPOSITORY> "
                 "--windows-repo <WINDOWS_REPOSITORY_PATH>"
@@ -404,6 +425,8 @@ def print_status(status: dict[str, Any], as_json: bool) -> None:
         return
     print(f"Config: {status['config_path']}")
     print(f"Remote ID: {status['remote_id']}")
+    if status.get("source"):
+        print(f"Source: {status['source']['mode']}: {status['source']['windows_repo']}")
     print(f"Status: {'ready' if status['ok'] else 'not ready'}")
     for field in status["missing"]:
         print(f"Missing: {field}")
@@ -1031,19 +1054,19 @@ def make_run_directory() -> Path:
     return path
 
 
-def configured_values(repo: Path, path: Path) -> tuple[str, str, str]:
+def configured_values(repo: Path, path: Path) -> tuple[str, dict[str, str], str]:
     status = configuration_status(repo, path)
     if not status["ok"]:
         print_status(status, as_json=True)
         raise SetupError(
-            "local configuration is missing or invalid; collect the requested Windows paths "
-            "and run the config set commands"
+            "local configuration is missing or invalid; inspect the reported fields "
+            "and source path before changing configuration"
         )
     config = load_config(path)
     remote_id = status["remote_id"]
     return (
         str(config["keil"]["uv4"]),
-        str(config["projects"][remote_id]["windows_repo"]),
+        status["source"],
         remote_id,
     )
 
@@ -1052,7 +1075,8 @@ def command_run(args: argparse.Namespace, *, flash: bool) -> int:
     require_tools("git", "git.exe", "cmd.exe", "wslpath")
     repo = resolve_repo(args.repo)
     path = config_path(args.config)
-    uv4, windows_repo, remote_id = configured_values(repo, path)
+    uv4, source, remote_id = configured_values(repo, path)
+    windows_repo = source["windows_repo"]
     windows_root = windows_git_text(windows_repo, "rev-parse", "--show-toplevel")
     windows_temp = cmd_environment("TEMP")
     temp_parent_windows = str(PureWindowsPath(windows_temp) / CONFIG_DIR_NAME)
@@ -1176,6 +1200,7 @@ def command_run(args: argparse.Namespace, *, flash: bool) -> int:
     summary: dict[str, Any] = {
         "operation": "flash" if flash else "build",
         "remote_id": remote_id,
+        "source": source,
         "commit": snapshot.commit,
         "base_commit": snapshot.base_commit,
         "snapshot_commit": snapshot.commit,
@@ -1258,17 +1283,19 @@ def command_config_set_keil(args: argparse.Namespace) -> int:
 
 
 def command_config_set_project(args: argparse.Namespace) -> int:
-    require_tools("git", "git.exe")
+    require_tools("git", "git.exe", "wslpath")
     repo = resolve_repo(args.repo)
     _, remote_id = repo_remote(repo)
-    error = validate_windows_repo(args.windows_repo, remote_id)
+    project = {"mode": "wsl"} if args.wsl else {"windows_repo": args.windows_repo}
+    source = resolve_windows_source(repo, project)
+    error = validate_windows_repo(source["windows_repo"], remote_id)
     if error:
-        raise SetupError(f"invalid --windows-repo path: {error}")
+        raise SetupError(f"invalid {source['mode']} repository path: {error}")
     path = config_path(args.config)
     config = load_config(path)
-    config["projects"][remote_id] = {"windows_repo": args.windows_repo}
+    config["projects"][remote_id] = project
     save_config(path, config)
-    print(f"Saved Windows repository for {remote_id} in {path}")
+    print(f"Saved {source['mode']} source for {remote_id} in {path}")
     return 0
 
 
@@ -1314,11 +1341,15 @@ def build_parser() -> argparse.ArgumentParser:
     set_keil.set_defaults(func=command_config_set_keil)
 
     set_project = config_commands.add_parser(
-        "set-project", help="associate a Git remote with its Windows clone"
+        "set-project", help="use the current WSL checkout or a separate Windows clone"
     )
     set_project.add_argument("--repo", default=".", help="WSL repository path")
-    set_project.add_argument(
-        "--windows-repo", required=True, help="path to the matching Windows clone"
+    project_source = set_project.add_mutually_exclusive_group(required=True)
+    project_source.add_argument(
+        "--windows-repo", help="Windows path to the matching repository"
+    )
+    project_source.add_argument(
+        "--wsl", action="store_true", help="derive the Windows path from the current WSL repository"
     )
     add_config_path(set_project)
     set_project.set_defaults(func=command_config_set_project)

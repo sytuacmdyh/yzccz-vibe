@@ -1,11 +1,11 @@
 ---
 name: yzc-keil-wsl
-description: Build, flash, and verify Keil uVision/UV4 projects from WSL at an exact Git snapshot, and perform controlled live Cortex-M diagnostics with Keil, ST-Link, or pyOCD. Use when a user asks to compile, rebuild, program connected hardware, inspect live firmware state, or validate one or more .uvprojx targets, especially when WSL and Windows use separate clones or Git worktrees.
+description: Build, flash, and verify Keil uVision/UV4 projects from WSL at an exact Git snapshot, using the current WSL repository through its Windows path or a separate Windows clone. Also supports controlled live Cortex-M diagnostics with Keil, ST-Link, or pyOCD. Use for compilation, rebuilds, hardware programming, live firmware inspection, or validation of .uvprojx targets.
 ---
 
 # Keil WSL Build, Flash, and Debug
 
-Run Keil through its Windows CLI without opening the GUI. The bundled script validates that the WSL and Windows clones identify the same remote, transfers an exact snapshot of the WSL worktree when necessary, and builds or flashes from a disposable Windows Git worktree.
+Run Keil through its Windows CLI without opening the GUI. By default, the script derives the current WSL repository's Windows path with `wslpath -w`, including `\\wsl.localhost\...` paths opened directly in Windows Keil. An existing Windows-clone mapping takes precedence. Both modes build or flash an exact snapshot from a disposable Windows Git worktree.
 
 ## Locate the script
 
@@ -32,8 +32,8 @@ uv run --script "$SKILL_ROOT/scripts/keil_build.py" --help
    uv run --script "$SKILL_ROOT/scripts/keil_build.py" config status --repo . --json
    ```
 
-3. If the result lists missing or invalid values, read [references/configuration.md](references/configuration.md). Ask the user only for the missing Windows path values. Never invent a path or commit a personal path to Git.
-4. Store values with the script's `config set-keil` and `config set-project` commands after the user supplies them, then rerun `config status`.
+3. Check `source.mode` and `source.windows_repo` in the status result. Direct WSL access needs no separate Windows clone or manually supplied repository path. If values are missing or invalid, read [references/configuration.md](references/configuration.md); ask only for information that cannot be derived or was not already supplied. Never invent a path or commit a personal path to Git.
+4. Store a supplied Keil path with `config set-keil`. Use `config set-project --repo . --wsl` when the user wants the current WSL checkout instead of an existing clone mapping, or `--windows-repo <PATH>` for a separate clone. Rerun `config status` after configuration changes.
 5. For a build request, build all `*.uvprojx` files and declared targets unless the user narrows the request:
 
    ```bash
@@ -48,8 +48,8 @@ uv run --script "$SKILL_ROOT/scripts/keil_build.py" --help
      --project '<REPOSITORY_RELATIVE_PATH>' --target '<TARGET_NAME>'
    ```
 
-   The command builds the selected target's detected dependencies first, copies a same-named local `.uvoptx` from the configured Windows clone when present, and flashes only the requested target. A failed required build skips Flash Download.
-7. Report the recorded `base_commit`, `snapshot_commit`, `tree_hash`, and `includes_untracked` values; every build target's error and warning counts; the Flash status and options-file hash when applicable; and the summary/log directory. The legacy `commit` field remains an alias for the snapshot commit.
+   The command builds the selected target's detected dependencies first, copies a same-named local `.uvoptx` from the source repository when present, and flashes only the requested target. A failed required build skips Flash Download.
+7. Report the source mode and the recorded `base_commit`, `snapshot_commit`, `tree_hash`, and `includes_untracked` values; every build target's error and warning counts; the Flash status and options-file hash when applicable; and the summary/log directory. The legacy `commit` field remains an alias for the snapshot commit.
 
 ## Live debug authorization
 
@@ -61,13 +61,14 @@ uv run --script "$SKILL_ROOT/scripts/keil_build.py" --help
 
 ## Preconditions and interpretation
 
-- When the WSL worktree has staged, unstaged, deleted, or untracked files, prefer the script's Git bundle path. It creates a temporary index from `HEAD`, adds the current non-ignored worktree state, writes a temporary commit without moving the current branch, and transfers that commit to Windows in a bundle.
+- When the WSL worktree has staged, unstaged, deleted, or untracked files, the script creates a temporary index from `HEAD`, adds the current non-ignored worktree state, and writes a temporary commit without moving the current branch. Direct WSL access shares these Git objects; a separate clone receives the snapshot through a Git bundle when needed.
+- Windows Git commands accessing `\\wsl.localhost\...` or `\\wsl$\...` receive a command-scoped `safe.directory` for that exact repository. Do not add global trust entries or use `safe.directory=*` to work around WSL ownership checks.
 - Continue to reject dirty, uninitialized, conflicted, or `HEAD`-mismatched submodules because their contents cannot be represented by the superproject snapshot alone.
 - Do not clean, reset, stash, or otherwise alter either user's main worktree.
 - Do not invoke or automate the uVision GUI. Builds use `UV4.exe -r ... -j0`; Flash Download uses `UV4.exe -f ... -j0`. Never use `-d`, which starts a debugging session.
 - Treat parsed Keil logs as authoritative. A build with zero errors succeeds even when UV4 returns a nonzero process exit because warnings are present. Flash succeeds only when its log contains `Erase Done.`, `Programming Done.`, and `Verify OK.`.
 - Flash only when the user requested hardware programming and the programmer and board are connected. The command requires one explicit project and target, but automatically builds detected producer targets first.
-- Treat a same-named `.uvoptx` in the configured Windows clone as local programmer configuration. The script copies it into the disposable worktree, records its SHA-256, and never adds it to the Git snapshot. If no local sidecar exists, a tracked snapshot copy may be used; otherwise Keil must obtain sufficient Flash configuration from the project itself.
+- Treat a same-named `.uvoptx` in the current WSL checkout (WSL mode) or configured Windows clone as local programmer configuration. The script copies it into the disposable worktree and records its SHA-256; keep personal sidecars Git-ignored. If no local sidecar exists, a tracked snapshot copy may be used; otherwise Keil must obtain sufficient Flash configuration from the project itself.
 - The script may fetch objects into the Windows clone. For an uncommitted snapshot it bypasses the remote fetch and transfers the temporary commit with a Git bundle; clean commits use a bundle only when the commit is unavailable from the Windows clone and origin.
 - The temporary index, ref, and bundle are removed after use. The temporary commit and tree objects become unreachable in the WSL object database and are left for normal Git garbage collection.
 - Local configuration lives outside the skill and outside project repositories. Build logs and the JSON run summary are retained in the XDG state directory.
