@@ -39,7 +39,7 @@ This stores `{"mode": "wsl"}` under the repository's normalized remote ID. It de
 
 For WSL UNC paths, each Windows Git command adds `-c safe.directory=<exact-repository-path>`. This handles the Windows/WSL ownership mismatch without changing global Git configuration, disabling checks for other repositories, or requiring `GIT_CONFIG_*`/`WSLENV` overrides.
 
-Direct access selects the source repository; builds still run against a disposable snapshot under Windows TEMP. Edits saved in Windows Keil are included in that snapshot. This validates compilation of the current files, not Keil's ability to place build outputs directly on the UNC share.
+Direct access selects the source repository; the normal build still runs against a disposable snapshot under Windows TEMP. Use `build --direct-wsl` to make UV4 operate on the WSL checkout itself. That mode validates Linux case-sensitive paths and UNC-share output writes, but it leaves generated outputs and any Keil project metadata changes in the source checkout.
 
 ## Separate Windows clone
 

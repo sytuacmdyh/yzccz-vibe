@@ -442,6 +442,42 @@ def test_parse_keil_log(content: bytes, expected: tuple[int, int] | None) -> Non
     assert keil_build.parse_keil_log(content) == expected
 
 
+def test_parse_keil_log_handles_mixed_code_page_output() -> None:
+    content = b"compiler output: \x80\r\nApp.axf - 0 Error(s), 17 Warning(s).\r\n"
+
+    assert keil_build.parse_keil_log(content) == (0, 17)
+
+
+def test_build_parser_accepts_direct_wsl_mode() -> None:
+    args = keil_build.build_parser().parse_args(["build", "--direct-wsl"])
+
+    assert args.direct_wsl is True
+
+
+def test_direct_mode_creates_repository_relative_output_directory(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    project_dir = repo / "MDK"
+    project_dir.mkdir(parents=True)
+    (project_dir / "App.uvprojx").write_text(
+        """
+<Project><Targets><Target><TargetName>App</TargetName>
+<TargetOption><TargetCommonOption>
+<OutputDirectory>..\\output\\app\\</OutputDirectory>
+</TargetCommonOption></TargetOption></Target></Targets></Project>
+""",
+        encoding="utf-8",
+    )
+
+    output = keil_build.ensure_target_output_directory(
+        repo, keil_build.ProjectTarget("MDK/App.uvprojx", "App")
+    )
+
+    assert output == repo / "output" / "app"
+    assert output.is_dir()
+
+
 @pytest.mark.parametrize(
     ("content", "success", "detail_fragment"),
     [

@@ -144,7 +144,15 @@ def run(
 
 
 def decode_output(data: bytes) -> str:
-    for encoding in ("utf-8-sig", "gb18030", "utf-16", "latin-1"):
+    # Keil logs can contain compiler output in a mixed or invalid code page.
+    # Trying utf-16 unconditionally is unsafe: Python accepts many arbitrary
+    # byte sequences as BOM-less UTF-16 and silently turns a normal log into
+    # garbage, which prevents the error/warning summary from being parsed.
+    encodings = ("utf-8-sig", "gb18030")
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")) or b"\x00" in data[:4096]:
+        encodings += ("utf-16",)
+    encodings += ("latin-1",)
+    for encoding in encodings:
         try:
             return data.decode(encoding)
         except UnicodeDecodeError:
@@ -625,6 +633,35 @@ def target_output_token(
     return f"{relative_output.rstrip('/')}/{output_name}".casefold()
 
 
+def ensure_target_output_directory(repo: Path, item: ProjectTarget) -> Path:
+    project = repo / item.project
+    target = target_element(project, item.target)
+    if target is None:
+        raise SetupError(f"target not found: {item.project} :: {item.target}")
+    output_directory = first_xml_text(target, "OutputDirectory")
+    if not output_directory or "$" in output_directory:
+        raise SetupError(
+            f"target has no repository-relative OutputDirectory: "
+            f"{item.project} :: {item.target}"
+        )
+    relative = PurePosixPath(output_directory.replace("\\", "/"))
+    if relative.is_absolute():
+        raise SetupError(
+            f"target OutputDirectory must be repository-relative: "
+            f"{item.project} :: {item.target}"
+        )
+    output = (project.parent / Path(relative)).resolve()
+    try:
+        output.relative_to(repo)
+    except ValueError as exc:
+        raise SetupError(
+            f"target OutputDirectory escapes the repository: "
+            f"{item.project} :: {item.target}"
+        ) from exc
+    output.mkdir(parents=True, exist_ok=True)
+    return output
+
+
 def target_dependencies(
     repo: Path, selected: Sequence[ProjectTarget]
 ) -> dict[ProjectTarget, set[ProjectTarget]]:
@@ -1076,17 +1113,34 @@ def command_run(args: argparse.Namespace, *, flash: bool) -> int:
     repo = resolve_repo(args.repo)
     path = config_path(args.config)
     uv4, source, remote_id = configured_values(repo, path)
+    direct_wsl = bool(getattr(args, "direct_wsl", False))
+    if direct_wsl and source.get("mode") != "wsl":
+        raise SetupError("--direct-wsl requires a WSL source mapping")
     windows_repo = source["windows_repo"]
-    windows_root = windows_git_text(windows_repo, "rev-parse", "--show-toplevel")
-    windows_temp = cmd_environment("TEMP")
-    temp_parent_windows = str(PureWindowsPath(windows_temp) / CONFIG_DIR_NAME)
-    token = uuid.uuid4().hex
-    worktree_windows = str(PureWindowsPath(temp_parent_windows) / token / "worktree")
-    if not is_windows_descendant(worktree_windows, temp_parent_windows):
-        raise SetupError("refusing to create a temporary worktree outside Windows TEMP")
-
-    temp_parent_wsl = windows_to_wsl(str(PureWindowsPath(temp_parent_windows) / token))
-    temp_parent_wsl.mkdir(parents=True, exist_ok=False)
+    windows_root = (
+        None
+        if direct_wsl
+        else windows_git_text(windows_repo, "rev-parse", "--show-toplevel")
+    )
+    temp_parent_windows: str | None = None
+    temp_parent_wsl: Path | None = None
+    worktree_windows = windows_repo
+    worktree_wsl = repo
+    if not direct_wsl:
+        windows_temp = cmd_environment("TEMP")
+        temp_parent_windows = str(PureWindowsPath(windows_temp) / CONFIG_DIR_NAME)
+        token = uuid.uuid4().hex
+        worktree_windows = str(
+            PureWindowsPath(temp_parent_windows) / token / "worktree"
+        )
+        if not is_windows_descendant(worktree_windows, temp_parent_windows):
+            raise SetupError(
+                "refusing to create a temporary worktree outside Windows TEMP"
+            )
+        temp_parent_wsl = windows_to_wsl(
+            str(PureWindowsPath(temp_parent_windows) / token)
+        )
+        temp_parent_wsl.mkdir(parents=True, exist_ok=False)
     transfer_dir = Path(tempfile.mkdtemp(prefix=f"{CONFIG_DIR_NAME}-"))
     run_dir = make_run_directory()
     saved_logs = run_dir / "logs"
@@ -1108,27 +1162,35 @@ def command_run(args: argparse.Namespace, *, flash: bool) -> int:
             )
         else:
             selected = select_targets(repo, args.project, args.target, snapshot.commit)
-        bundle = ensure_windows_commit(
-            repo,
-            windows_root,
-            snapshot.commit,
-            transfer_dir,
-            prefer_bundle=snapshot.dirty,
-        )
-        windows_git(
-            windows_root,
-            "worktree",
-            "add",
-            "--detach",
-            worktree_windows,
-            snapshot.commit,
-        )
-        worktree_added = True
-        worktree_wsl = windows_to_wsl(worktree_windows)
-        raw_log_dir_windows = str(
-            PureWindowsPath(worktree_windows) / ".yzc-keil-build-logs"
-        )
-        raw_log_dir_wsl = worktree_wsl / ".yzc-keil-build-logs"
+        if direct_wsl:
+            for item in selected:
+                ensure_target_output_directory(repo, item)
+        if not direct_wsl:
+            assert windows_root is not None
+            bundle = ensure_windows_commit(
+                repo,
+                windows_root,
+                snapshot.commit,
+                transfer_dir,
+                prefer_bundle=snapshot.dirty,
+            )
+            windows_git(
+                windows_root,
+                "worktree",
+                "add",
+                "--detach",
+                worktree_windows,
+                snapshot.commit,
+            )
+            worktree_added = True
+            worktree_wsl = windows_to_wsl(worktree_windows)
+            raw_log_dir_windows = str(
+                PureWindowsPath(worktree_windows) / ".yzc-keil-build-logs"
+            )
+            raw_log_dir_wsl = worktree_wsl / ".yzc-keil-build-logs"
+        else:
+            raw_log_dir_wsl = run_dir / "raw-logs"
+            raw_log_dir_windows = wsl_to_windows(raw_log_dir_wsl)
         raw_log_dir_wsl.mkdir()
         if flash_target is not None:
             flash_options = inject_flash_options(
@@ -1183,15 +1245,20 @@ def command_run(args: argparse.Namespace, *, flash: bool) -> int:
                     "git worktree remove failed: "
                     + decode_output(removed.stderr or removed.stdout).strip()
                 )
-        if is_windows_descendant(worktree_windows, temp_parent_windows):
-            try:
-                shutil.rmtree(temp_parent_wsl, ignore_errors=False)
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                cleanup_errors.append(f"temporary directory cleanup failed: {exc}")
-        else:
-            cleanup_errors.append("temporary directory failed the cleanup safety check")
+        if not direct_wsl:
+            assert temp_parent_windows is not None
+            assert temp_parent_wsl is not None
+            if is_windows_descendant(worktree_windows, temp_parent_windows):
+                try:
+                    shutil.rmtree(temp_parent_wsl, ignore_errors=False)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    cleanup_errors.append(f"temporary directory cleanup failed: {exc}")
+            else:
+                cleanup_errors.append(
+                    "temporary directory failed the cleanup safety check"
+                )
         if bundle is not None:
             bundle.unlink(missing_ok=True)
         shutil.rmtree(transfer_dir, ignore_errors=True)
@@ -1201,6 +1268,7 @@ def command_run(args: argparse.Namespace, *, flash: bool) -> int:
         "operation": "flash" if flash else "build",
         "remote_id": remote_id,
         "source": source,
+        "workspace_mode": "direct-wsl" if direct_wsl else "temporary-windows-worktree",
         "commit": snapshot.commit,
         "base_commit": snapshot.base_commit,
         "snapshot_commit": snapshot.commit,
@@ -1221,6 +1289,10 @@ def command_run(args: argparse.Namespace, *, flash: bool) -> int:
     )
 
     print(f"Base HEAD: {snapshot.base_commit}")
+    print(
+        "Workspace: "
+        + ("direct WSL checkout" if direct_wsl else "temporary Windows worktree")
+    )
     print(f"Snapshot commit: {snapshot.commit}")
     print(f"Tree: {snapshot.tree_hash}")
     print(f"Includes untracked files: {'yes' if snapshot.includes_untracked else 'no'}")
@@ -1375,6 +1447,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build.add_argument(
         "--timeout", type=int, default=DEFAULT_TIMEOUT, help="seconds per target"
+    )
+    build.add_argument(
+        "--direct-wsl",
+        action="store_true",
+        help="invoke UV4 against the current WSL checkout instead of a Windows worktree",
     )
     add_config_path(build)
     build.set_defaults(func=command_build)

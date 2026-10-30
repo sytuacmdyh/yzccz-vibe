@@ -1,11 +1,11 @@
 ---
 name: yzc-keil-wsl
-description: Build, flash, and verify Keil uVision/UV4 projects from WSL at an exact Git snapshot, using the current WSL repository through its Windows path or a separate Windows clone. Also supports controlled live Cortex-M diagnostics with Keil, ST-Link, or pyOCD. Use for compilation, rebuilds, hardware programming, live firmware inspection, or validation of .uvprojx targets.
+description: Build, flash, and verify Keil uVision/UV4 projects from WSL at an exact Git snapshot, using the current WSL repository through its Windows path or a separate Windows clone. Also supports direct WSL checkout builds when Linux case sensitivity and native output paths must be validated. Also supports controlled live Cortex-M diagnostics with Keil, ST-Link, or pyOCD. Use for compilation, rebuilds, hardware programming, live firmware inspection, or validation of .uvprojx targets.
 ---
 
 # Keil WSL Build, Flash, and Debug
 
-Run Keil through its Windows CLI without opening the GUI. By default, the script derives the current WSL repository's Windows path with `wslpath -w`, including `\\wsl.localhost\...` paths opened directly in Windows Keil. An existing Windows-clone mapping takes precedence. Both modes build or flash an exact snapshot from a disposable Windows Git worktree.
+Run Keil through its Windows CLI without opening the GUI. By default, the script derives the current WSL repository's Windows path with `wslpath -w`, including `\\wsl.localhost\...` paths opened directly in Windows Keil. An existing Windows-clone mapping takes precedence. The default mode builds or flashes an exact snapshot from a disposable Windows Git worktree. Build-only `--direct-wsl` mode invokes UV4 against the current WSL checkout to expose case-sensitive path and output-directory problems.
 
 ## Locate the script
 
@@ -41,6 +41,7 @@ uv run --script "$SKILL_ROOT/scripts/keil_build.py" --help
    ```
 
    Use `--project <REPOSITORY_RELATIVE_PATH>` and repeatable `--target <TARGET_NAME>` only when a narrower build was requested.
+   Add `--direct-wsl` when the build must validate the current checkout directly through its `\\wsl.localhost\...` path. This mode writes Keil outputs and project metadata into the current checkout and is intended for build diagnostics.
 6. For a hardware programming or modification-validation request, require one explicit project and target:
 
    ```bash
@@ -62,6 +63,7 @@ uv run --script "$SKILL_ROOT/scripts/keil_build.py" --help
 ## Preconditions and interpretation
 
 - When the WSL worktree has staged, unstaged, deleted, or untracked files, the script creates a temporary index from `HEAD`, adds the current non-ignored worktree state, and writes a temporary commit without moving the current branch. Direct WSL access shares these Git objects; a separate clone receives the snapshot through a Git bundle when needed.
+- `build --direct-wsl` still records the source snapshot for reporting, but UV4 reads and writes the current WSL checkout directly. It does not create a Windows worktree, and Keil-generated outputs or project metadata may remain in the checkout.
 - Windows Git commands accessing `\\wsl.localhost\...` or `\\wsl$\...` receive a command-scoped `safe.directory` for that exact repository. Do not add global trust entries or use `safe.directory=*` to work around WSL ownership checks.
 - Continue to reject dirty, uninitialized, conflicted, or `HEAD`-mismatched submodules because their contents cannot be represented by the superproject snapshot alone.
 - Do not clean, reset, stash, or otherwise alter either user's main worktree.
